@@ -1,0 +1,55 @@
+# Traefik STATIC configuration (loaded once at startup).
+# Per-app routing lives in the file-provider dir (./traefik/dynamic), generated
+# from .env by scripts/generate-routes.sh — do not hand-edit routes here.
+
+global:
+  checkNewVersion: true
+  sendAnonymousUsage: false
+
+entryPoints:
+  web:
+    address: ":80"
+    # Force every plain-HTTP request to HTTPS.
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+  websecure:
+    address: ":443"
+
+providers:
+  # (1) File provider — routes declared in .env, rendered into this directory.
+  #     Use this for apps that DON'T carry their own Traefik labels.
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+  # (2) Docker provider — label-driven apps opt in with `traefik.enable=true`.
+  #     This is how the example-app multi-tenant stack is discovered (its
+  #     tenant containers already carry all routing/middleware labels on the
+  #     `app-traffic` network). `exposedByDefault: false` = ignore any
+  #     container that doesn't explicitly opt in. `network: web` is the default
+  #     backend network; app labels override it per-container with
+  #     `traefik.docker.network=app-traffic`.
+  docker:
+    exposedByDefault: false
+    network: web
+
+certificatesResolvers:
+  le:
+    acme:
+      # email is injected via TRAEFIK_CERTIFICATESRESOLVERS_LE_ACME_EMAIL (see compose/.env)
+      storage: /letsencrypt/acme.json
+      # TLS-ALPN challenge works out of the box for single hostnames.
+      # For wildcard certs, switch to a dnsChallenge block instead (see README).
+      tlsChallenge: {}
+
+api:
+  dashboard: true
+
+log:
+  level: INFO
+
+accessLog: {}
