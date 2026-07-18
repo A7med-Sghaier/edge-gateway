@@ -1,32 +1,23 @@
-<h1 align="center">Edge Gateway</h1>
+# Edge Gateway
 
-<p align="center">
-  A single, portable <b>Traefik</b> edge reverse-proxy for an entire server — the
-  <b>only</b> process that binds <code>:80</code> / <code>:443</code> and owns
-  <b>all</b> TLS certificates. Every app on the box sits behind it, routed either from
-  one <code>.env</code> file or by auto-discovered Docker labels.
-</p>
+![Traefik](https://img.shields.io/badge/Traefik-v3.3-24A1C1?logo=traefikproxy&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+![Let's Encrypt](https://img.shields.io/badge/Let's_Encrypt-ACME-003A70?logo=letsencrypt&logoColor=white)
+![Shell](https://img.shields.io/badge/POSIX-sh-4EAA25?logo=gnubash&logoColor=white)
+![Alpine](https://img.shields.io/badge/Alpine-3.20-0D597F?logo=alpinelinux&logoColor=white)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-<p align="center">
-  <img alt="Traefik" src="https://img.shields.io/badge/Traefik-v3.3-24A1C1?logo=traefikproxy&logoColor=white">
-  <img alt="Docker" src="https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white">
-  <img alt="Let's Encrypt" src="https://img.shields.io/badge/Let's_Encrypt-ACME-003A70?logo=letsencrypt&logoColor=white">
-  <img alt="Shell" src="https://img.shields.io/badge/POSIX-sh-4EAA25?logo=gnubash&logoColor=white">
-  <img alt="Alpine" src="https://img.shields.io/badge/Alpine-3.20-0D597F?logo=alpinelinux&logoColor=white">
-  <img alt="License" src="https://img.shields.io/badge/License-MIT-yellow.svg">
-</p>
+Edge Gateway is a single, portable Traefik edge reverse-proxy for an entire server — the **only** process that binds `:80` / `:443` and owns **all** TLS certificates. It terminates TLS with automatic Let's Encrypt certificates and forwards each inbound request to the right backend, with every app on the box sitting behind it.
 
-Edge Gateway consolidates every inbound HTTP/HTTPS request for a whole server behind
-one Traefik instance. It terminates TLS with automatic Let's Encrypt certificates and
-forwards each request to the right backend using **two complementary providers**:
+This repository is currently private while it is prepared as a portfolio case study.
+
+Edge Gateway routes traffic using **two complementary providers**:
 
 - **File provider** — routing declared in **one `.env` file**, for apps that carry no
   Traefik labels of their own.
 - **Docker provider** — apps that already ship Traefik labels are discovered
   automatically. This is how the multi-tenant **example-app** stack plugs in with
   **zero label changes**.
-
-This repository is currently private while it is prepared as a portfolio case study.
 
 ## Portfolio Value
 
