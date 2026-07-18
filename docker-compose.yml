@@ -1,0 +1,56 @@
+name: edge-gateway
+
+# Single edge reverse-proxy for a whole server.
+# - `route-generator` renders Traefik dynamic config from the routes declared in .env
+# - `traefik` is the ONLY thing that binds :80 / :443 and owns all TLS certs
+#
+# Every backend app joins the shared external `web` network so Traefik can reach it
+# by container name (e.g. http://example-app:3000).
+
+services:
+  # Renders ./traefik/dynamic/routes.yml from the ROUTE_* entries in .env, then exits.
+  # Re-run it (`docker compose run --rm route-generator`) after editing .env — Traefik
+  # hot-reloads the file, no restart needed.
+  route-generator:
+    image: alpine:3.20
+    env_file: .env
+    volumes:
+      - ./scripts/generate-routes.sh:/generate-routes.sh:ro
+      - ./traefik/dynamic:/out
+    command: sh /generate-routes.sh /out/routes.yml
+    restart: "no"
+
+  traefik:
+    image: traefik:v3.3
+    restart: unless-stopped
+    depends_on:
+      route-generator:
+        condition: service_completed_successfully
+    environment:
+      # Static config that carries a secret / per-server value is injected via env
+      # (Traefik reads TRAEFIK_* env vars as static config).
+      - TRAEFIK_CERTIFICATESRESOLVERS_LE_ACME_EMAIL=${ACME_EMAIL}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+      - ./letsencrypt:/letsencrypt
+    networks:
+      - web
+      - app-traffic
+
+networks:
+  # Generic shared network label-driven / file-route apps join. Create once:
+  #   docker network create web
+  web:
+    external: true
+  # The example-app multi-tenant data plane. Its tenant containers attach
+  # here and carry Traefik labels (traefik.docker.network=app-traffic), so
+  # this edge discovers and routes them with zero label changes. Created by the
+  # app deploy (ensure_external_bridge_network) or once by hand:
+  #   docker network create app-traffic
+  app-traffic:
+    external: true
