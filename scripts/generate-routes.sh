@@ -3,9 +3,9 @@
 # POSIX sh (runs on Alpine/busybox). Output path is arg 1 (default /out/routes.yml).
 #
 # Route convention in .env (N = 1, 2, 3, ...; must be contiguous starting at 1):
-#   ROUTE_1_NAME=example-app                         # unique router/service id
-#   ROUTE_1_HOSTS=tinodev.example.com,testcoiff.ex.com # comma-separated hostnames
-#   ROUTE_1_SERVICE=http://example-app:3000          # backend url (container or external)
+#   ROUTE_1_NAME=dashboard                             # unique router/service id
+#   ROUTE_1_HOSTS=dash.example.com,app.example.com     # comma-separated hostnames
+#   ROUTE_1_SERVICE=http://dashboard:8080              # backend url (container or external)
 #   ROUTE_1_TLS=true                                   # optional, default true
 #   ROUTE_1_ENTRYPOINTS=websecure                      # optional, default websecure
 #

@@ -27,11 +27,11 @@ providers:
     watch: true
 
   # (2) Docker provider — label-driven apps opt in with `traefik.enable=true`.
-  #     This is how the example-app multi-tenant stack is discovered (its
-  #     tenant containers already carry all routing/middleware labels on the
-  #     `app-traffic` network). `exposedByDefault: false` = ignore any
+  #     This is how a labelled multi-tenant stack is discovered (its tenant
+  #     containers already carry all routing/middleware labels on a shared
+  #     network such as `app-traffic`). `exposedByDefault: false` = ignore any
   #     container that doesn't explicitly opt in. `network: web` is the default
-  #     backend network; app labels override it per-container with
+  #     backend network; an app can override it per-container with
   #     `traefik.docker.network=app-traffic`.
   docker:
     exposedByDefault: false

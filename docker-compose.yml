@@ -5,7 +5,7 @@ name: edge-gateway
 # - `traefik` is the ONLY thing that binds :80 / :443 and owns all TLS certs
 #
 # Every backend app joins the shared external `web` network so Traefik can reach it
-# by container name (e.g. http://example-app:3000).
+# by container name (e.g. http://dashboard:8080).
 
 services:
   # Renders ./traefik/dynamic/routes.yml from the ROUTE_* entries in .env, then exits.
@@ -47,10 +47,10 @@ networks:
   #   docker network create web
   web:
     external: true
-  # The example-app multi-tenant data plane. Its tenant containers attach
-  # here and carry Traefik labels (traefik.docker.network=app-traffic), so
-  # this edge discovers and routes them with zero label changes. Created by the
-  # app deploy (ensure_external_bridge_network) or once by hand:
+  # Example second data-plane network for a labelled multi-tenant app. Its tenant
+  # containers attach here and carry Traefik labels (traefik.docker.network=app-traffic),
+  # so this edge discovers and routes them with zero label changes. Rename it to
+  # whatever your app uses; create it (or let the app create it) once by hand:
   #   docker network create app-traffic
   app-traffic:
     external: true

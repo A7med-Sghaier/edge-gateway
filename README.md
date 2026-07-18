@@ -29,7 +29,8 @@ certificates. It terminates TLS with automatic **Let's Encrypt** certificates an
 forwards every inbound request to the right backend through **two complementary
 providers**: a **file provider** driven by one `.env` file for label-less apps, and a
 **Docker provider** that auto-discovers any container already carrying Traefik labels —
-so a multi-tenant **example-app** stack plugs in with **zero label changes**.
+so a multi-tenant app that already ships its own labels plugs in with **zero label
+changes**.
 
 This repository is currently private while it is prepared as a portfolio case study.
 
@@ -59,9 +60,9 @@ Edge Gateway demonstrates production-oriented platform and DevOps engineering:
 flowchart TD
   Net["Internet · :80 / :443"] --> Edge["edge-gateway (Traefik)<br/>owns 80/443 · auto Let's Encrypt (resolver le)"]
   Edge -->|docker provider<br/>exposedByDefault=false| Docker["Labelled Docker apps<br/>networks: web, app-traffic"]
-  Docker --> App["example-app tenants<br/>(labels on app-traffic — unchanged)"]
+  Docker --> Tenants["Multi-tenant app<br/>(its own Traefik labels — unchanged)"]
   Docker --> Other["Any other labelled Docker app (on web)"]
-  Edge -->|file provider<br/>routes.yml ← .env| File["Label-less apps<br/>dashboard-app, external URLs, …"]
+  Edge -->|file provider<br/>routes.yml ← .env| File["Label-less apps<br/>dashboard, external URLs, …"]
 ```
 
 | Provider | Used for | How routing is declared |
@@ -89,38 +90,37 @@ flowchart TD
   file-provider config at `traefik/dynamic/routes.yml`.
 - Traefik watches that file and hot-reloads — add a route without restarting Traefik.
 - Backends are reached by **container name** over the shared `web` network
-  (e.g. `http://dashboard-app:8080`), or by any external URL.
+  (e.g. `http://dashboard:8080`), or by any external URL.
 
 **Label-driven apps (Docker provider):**
 - Any container with `traefik.enable=true` on the `web` or `app-traffic` network is
   discovered automatically — its own labels define routing, TLS, and middlewares.
 - `exposedByDefault: false` means containers without that label are ignored.
 
-## How example-app plugs in (zero label changes)
+## How a labelled multi-tenant app plugs in (zero label changes)
 
-example-app already deploys each tenant as its own compose project whose
-`api`/`admin`/`frontend` containers attach to the external **`app-traffic`** network
-and carry per-tenant Traefik labels (routers, security headers, rate limits, admin IP
-allowlist). Those labels already reference the exact names this edge uses — network
-`app-traffic`, cert resolver `le`, entrypoints `web`/`websecure` — so once this edge
-is attached to `app-traffic` (it is, see `docker-compose.yml`), it discovers and routes
-every tenant automatically. **Nothing in the app tenant labels changes.**
+Some apps already deploy each tenant as its own compose project whose containers attach
+to a shared external network (here called **`app-traffic`**) and carry per-tenant Traefik
+labels — routers, security headers, rate limits, IP allowlists. As long as those labels
+reference the same names this edge uses — the cert resolver `le` and the entrypoints
+`web` / `websecure` — this edge discovers and routes every tenant automatically once it is
+attached to that network (it is, see `docker-compose.yml`). **Nothing in the app's labels
+changes.**
 
 The only app-side change is that its deploy must stop starting *its own* Traefik, since
-this edge now owns `:80`/`:443`. That is gated by an `EDGE_EXTERNAL=true` env in
-`exampleApp/scripts/run-tenant-prod.sh` (app still runs its shared mongo + autoheal).
-See "Cutover" below.
-
-<div align="center"><img src="./assets/divider.svg" width="70%" alt="" /></div>
+this edge now owns `:80` / `:443`. Gate that with a flag in the app's deploy (e.g.
+`EDGE_EXTERNAL=true`) so it skips its bundled proxy while still starting its own supporting
+services (database, healthchecks, and so on). See "Cutover" below.
 
 ## Quick start (per server)
 
 ```bash
-# 1. Shared networks. `web` is generic; `app-traffic` is example-app's data
-#    plane (the app deploy also creates it — creating it here first is harmless
-#    and lets this edge start independently, e.g. after a reboot).
+# 1. Shared networks. `web` is a generic network label-less/labelled apps join.
+#    `app-traffic` is an example second data-plane network for a labelled
+#    multi-tenant app — rename it to whatever your app uses. Creating them here
+#    first is harmless and lets this edge start independently, e.g. after a reboot.
 docker network create web
-docker network create app-traffic   # skip if app already created it
+docker network create app-traffic   # skip if your app already created it
 
 # 2. Configure
 cp .env.example .env
@@ -131,7 +131,7 @@ docker compose up -d
 ```
 
 That's it. Traefik requests a certificate per hostname automatically, and discovers all
-labelled containers (incl. app tenants) on `web` / `app-traffic`.
+labelled containers on `web` / `app-traffic`.
 
 ## Add / change a route
 
@@ -152,7 +152,7 @@ network for its DB:
 
 ```yaml
 services:
-  dashboard-app:
+  dashboard:
     # ...existing config...
     networks:
       - web        # reachable by the gateway
@@ -167,9 +167,9 @@ The app does **not** publish ports to the host and does **not** run its own Trae
 Traefik forwards the original `Host` header, so a multi-tenant app resolves the tenant
 exactly as it did behind nginx.
 
-For an app that already **has** Traefik labels (like example-app), you don't touch
-`.env` at all — just make sure its containers are on a network this edge is attached to
-(`web` or `app-traffic`) and it's discovered automatically.
+For an app that already **has** Traefik labels, you don't touch `.env` at all — just make
+sure its containers are on a network this edge is attached to (`web` or `app-traffic`) and
+it's discovered automatically.
 
 ## Optional: Traefik dashboard
 
@@ -184,41 +184,42 @@ Regenerate and it's served (with basic auth) at that host over HTTPS.
 
 <div align="center"><img src="./assets/divider.svg" width="70%" alt="" /></div>
 
-## Cutover (retire nginx + app's own Traefik)
+## Cutover (retire an existing nginx / per-app Traefik)
 
-example-app currently runs its own Traefik under the `legacy-edge` compose project.
-Because only one process can bind `:80`/`:443`, cutover swaps that for this edge in one
-window.
+If a host already runs its own proxy — a legacy nginx, or an app that bundles its own
+Traefik — only one process can bind `:80` / `:443`, so cutover swaps that for this edge in
+one window.
 
-1. On the server: `docker network create web` (`app-traffic` already exists).
-2. *(Optional — avoids re-issuing certs.)* Copy the existing Let's Encrypt store so this
-   edge reuses the certs app already obtained:
+1. On the server: `docker network create web` (and the app's data-plane network if it does
+   not exist yet).
+2. *(Optional — avoids re-issuing certs.)* Copy an existing Let's Encrypt store so this edge
+   reuses certificates already obtained:
    ```bash
-   docker cp legacy-edge-traefik-1:/letsencrypt/acme.json ./letsencrypt/acme.json
+   docker cp <old-traefik-container>:/letsencrypt/acme.json ./letsencrypt/acme.json
    ```
    (Otherwise certs are simply re-issued via TLS-ALPN on first request — fine for a
    handful of hostnames, within Let's Encrypt rate limits.)
 3. Bring `edge-gateway` up on **alternate ports first** — temporarily map `8080:80` /
-   `8443:443` in `docker-compose.yml` — while app's Traefik still serves prod. Verify it
+   `8443:443` in `docker-compose.yml` — while the old proxy still serves prod. Verify it
    sees tenant routers and any file routes:
    ```bash
-   curl -kI --resolve <tenant-host>:8443:127.0.0.1 https://<tenant-host>/
+   curl -kI --resolve <host>:8443:127.0.0.1 https://<host>/
    ```
-4. Maintenance window: stop app's Traefik, switch this edge back to `80:80` / `443:443`,
+4. Maintenance window: stop the old proxy, switch this edge back to `80:80` / `443:443`,
    relaunch:
    ```bash
-   docker rm -f legacy-edge-traefik-1
+   docker rm -f <old-traefik-container>
    # restore 80:80 / 443:443 in docker-compose.yml
    docker compose up -d
    ```
-5. Set `EDGE_EXTERNAL=true` in app's CI/prod tenant env so future tenant deploys never
-   start Traefik again (they still deploy api/admin/frontend and run mongo + autoheal).
+5. Set the app's `EDGE_EXTERNAL=true` (or equivalent) flag so future deploys never start
+   their own proxy again (they still deploy the app and its supporting services).
 6. Retire nginx: `systemctl stop nginx && systemctl disable nginx`. Keep it installed one
    day as instant rollback, then remove. DNS is unchanged throughout — hostnames now
    resolve to this edge.
 
-**Rollback:** unset `EDGE_EXTERNAL` (or set it `false`) and re-run a tenant deploy — app
-starts its own Traefik again on `:80`/`:443` exactly as before.
+**Rollback:** unset `EDGE_EXTERNAL` (or set it `false`) and re-run the app's deploy — it
+starts its own Traefik again on `:80` / `:443` exactly as before.
 
 ## Wildcard certificates (optional)
 
