@@ -1,23 +1,45 @@
-# Edge Gateway
+<div align="center">
 
-![Traefik](https://img.shields.io/badge/Traefik-v3.3-24A1C1?logo=traefikproxy&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
-![Let's Encrypt](https://img.shields.io/badge/Let's_Encrypt-ACME-003A70?logo=letsencrypt&logoColor=white)
-![Shell](https://img.shields.io/badge/POSIX-sh-4EAA25?logo=gnubash&logoColor=white)
-![Alpine](https://img.shields.io/badge/Alpine-3.20-0D597F?logo=alpinelinux&logoColor=white)
-![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+<img src="./assets/banner.svg" width="100%" alt="Ahmed Sghaier — Edge Gateway" />
 
-Edge Gateway is a single, portable Traefik edge reverse-proxy for an entire server — the **only** process that binds `:80` / `:443` and owns **all** TLS certificates. It terminates TLS with automatic Let's Encrypt certificates and forwards each inbound request to the right backend, with every app on the box sitting behind it.
+<br/>
+
+<a href="https://github.com/A7med-Sghaier/edge-gateway">
+  <img src="https://readme-typing-svg.demolab.com?font=Segoe+UI&weight=600&size=20&pause=1000&color=2DD4BF&center=true&vCenter=true&width=760&lines=One+Traefik+edge+for+the+whole+server;Owns+%3A80+%2F+%3A443+%C2%B7+all+TLS+certificates;Automatic+Lets+Encrypt+%C2%B7+file+%2B+Docker+routing;Zero-label+multi-tenant+discovery" alt="One Traefik edge that owns :80/:443 and all TLS, with env and Docker-label routing and zero-label multi-tenant discovery." />
+</a>
+
+<br/><br/>
+
+[![Traefik](https://img.shields.io/badge/Traefik-v3.3-24A1C1?style=for-the-badge&logo=traefikproxy&logoColor=white)](https://traefik.io)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com)
+[![Let's Encrypt](https://img.shields.io/badge/Let's_Encrypt-ACME-003A70?style=for-the-badge&logo=letsencrypt&logoColor=white)](https://letsencrypt.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-EAB308?style=for-the-badge)](LICENSE)
+
+![POSIX sh](https://img.shields.io/badge/POSIX_sh-4EAA25?style=flat-square&logo=gnubash&logoColor=white)
+![Alpine](https://img.shields.io/badge/Alpine_3.20-0D597F?style=flat-square&logo=alpinelinux&logoColor=white)
+![TLS-ALPN](https://img.shields.io/badge/TLS--ALPN-003A70?style=flat-square&logo=letsencrypt&logoColor=white)
+![Multi-tenant](https://img.shields.io/badge/Multi--tenant-2DD4BF?style=flat-square&logo=cloudflare&logoColor=white)
+![Self-hosted](https://img.shields.io/badge/Self--hosted-050B0F?style=flat-square&logo=linux&logoColor=white)
+
+</div>
+
+**Edge Gateway** is a single, portable **Traefik** edge reverse-proxy for a whole
+server — the **only** process that binds `:80` / `:443` and owns **all** TLS
+certificates. It terminates TLS with automatic **Let's Encrypt** certificates and
+forwards every inbound request to the right backend through **two complementary
+providers**: a **file provider** driven by one `.env` file for label-less apps, and a
+**Docker provider** that auto-discovers any container already carrying Traefik labels —
+so a multi-tenant **example-app** stack plugs in with **zero label changes**.
 
 This repository is currently private while it is prepared as a portfolio case study.
 
-Edge Gateway routes traffic using **two complementary providers**:
+> [!NOTE]
+> Only one process on a host can bind `:80`/`:443`. Edge Gateway is deliberately that
+> single process: routes for label-less apps are declared in `.env` and hot-reloaded
+> without restarting Traefik, while labelled containers (including existing multi-tenant
+> stacks) are discovered automatically over shared Docker networks — no per-app proxy.
 
-- **File provider** — routing declared in **one `.env` file**, for apps that carry no
-  Traefik labels of their own.
-- **Docker provider** — apps that already ship Traefik labels are discovered
-  automatically. This is how the multi-tenant **example-app** stack plugs in with
-  **zero label changes**.
+<div align="center"><img src="./assets/divider.svg" width="70%" alt="" /></div>
 
 ## Portfolio Value
 
@@ -42,6 +64,11 @@ flowchart TD
   Edge -->|file provider<br/>routes.yml ← .env| File["Label-less apps<br/>dashboard-app, external URLs, …"]
 ```
 
+| Provider | Used for | How routing is declared |
+| --- | --- | --- |
+| **File** | Apps with **no** Traefik labels | `ROUTE_*` blocks in `.env` → rendered to `traefik/dynamic/routes.yml`, hot-reloaded |
+| **Docker** | Apps that **already** ship Traefik labels | Auto-discovered on `web` / `app-traffic`; `traefik.enable=true` opt-in |
+
 ## Tech Stack
 
 | Area | Technology |
@@ -50,7 +77,9 @@ flowchart TD
 | TLS | Let's Encrypt / ACME, TLS-ALPN challenge, optional DNS-01 wildcard |
 | Runtime | Docker Compose, shared external networks (`web`, `app-traffic`) |
 | Route generation | POSIX `sh` script on Alpine 3.20, rendering Traefik dynamic config |
-| Configuration | `.env` file provider blocks + Docker labels |
+| Configuration | `.env` file-provider blocks + Docker labels |
+
+<div align="center"><img src="./assets/divider.svg" width="70%" alt="" /></div>
 
 ## How it works
 
@@ -82,7 +111,9 @@ this edge now owns `:80`/`:443`. That is gated by an `EDGE_EXTERNAL=true` env in
 `exampleApp/scripts/run-tenant-prod.sh` (app still runs its shared mongo + autoheal).
 See "Cutover" below.
 
-## First-time setup (per server)
+<div align="center"><img src="./assets/divider.svg" width="70%" alt="" /></div>
+
+## Quick start (per server)
 
 ```bash
 # 1. Shared networks. `web` is generic; `app-traffic` is example-app's data
@@ -151,6 +182,8 @@ DASHBOARD_AUTH=admin:$apr1$....      # from: htpasswd -nb admin 'password'
 
 Regenerate and it's served (with basic auth) at that host over HTTPS.
 
+<div align="center"><img src="./assets/divider.svg" width="70%" alt="" /></div>
+
 ## Cutover (retire nginx + app's own Traefik)
 
 example-app currently runs its own Traefik under the `legacy-edge` compose project.
@@ -201,6 +234,7 @@ the Traefik ACME `dnsChallenge` docs. The env-driven routing here stays identica
 edge-gateway/
 ├── docker-compose.yml         # route-generator + traefik
 ├── .env.example               # copy to .env — routes + ACME email live here
+├── assets/                    # README banner + divider (SVG)
 ├── traefik/
 │   ├── traefik.yml            # static config (entrypoints, ACME, providers)
 │   └── dynamic/               # generated routes.yml (gitignored)
@@ -211,3 +245,12 @@ edge-gateway/
 ## License
 
 Released under the [MIT License](LICENSE).
+
+<div align="center">
+
+<img src="./assets/divider.svg" width="50%" alt="" />
+
+**Ahmed Sghaier** · Senior Full-Stack Engineer
+[a7med-sghaier.app](https://a7med-sghaier.app) · [GitHub](https://github.com/A7med-Sghaier) · [LinkedIn](https://www.linkedin.com/in/ahmed-sghaier-449778137)
+
+</div>

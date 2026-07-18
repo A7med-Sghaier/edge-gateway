@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="280" viewBox="0 0 1200 280" role="img" aria-label="Ahmed Sghaier — Edge Gateway">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#050b0f"/>
+      <stop offset="0.55" stop-color="#07141a"/>
+      <stop offset="1" stop-color="#050b0f"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.28" cy="0.25" r="0.75">
+      <stop offset="0" stop-color="#2dd4bf" stop-opacity="0.16"/>
+      <stop offset="0.5" stop-color="#2dd4bf" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="ember" cx="0.85" cy="0.85" r="0.55">
+      <stop offset="0" stop-color="#f59e0b" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#f59e0b" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M48 0H0V48" fill="none" stroke="#2dd4bf" stroke-opacity="0.055" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="rule" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2dd4bf" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#2dd4bf" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#2dd4bf" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="280" fill="url(#bg)"/>
+  <rect width="1200" height="280" fill="url(#grid)"/>
+  <rect width="1200" height="280" fill="url(#glow)"/>
+  <rect width="1200" height="280" fill="url(#ember)"/>
+
+  <!-- constellation -->
+  <g stroke="#9adbd2" stroke-opacity="0.22" stroke-width="1" fill="none">
+    <path d="M905 60 L985 92 L1062 54 L1128 96"/>
+    <path d="M985 92 L1010 168 L1096 150"/>
+    <path d="M120 226 L188 196 L242 236"/>
+  </g>
+  <g fill="#2dd4bf">
+    <circle cx="905" cy="60" r="2.5" fill-opacity="0.8"/>
+    <circle cx="985" cy="92" r="3" fill-opacity="0.9"/>
+    <circle cx="1062" cy="54" r="2" fill-opacity="0.6"/>
+    <circle cx="1128" cy="96" r="2.5" fill-opacity="0.7"/>
+    <circle cx="1010" cy="168" r="2" fill-opacity="0.6"/>
+    <circle cx="1096" cy="150" r="2.5" fill-opacity="0.75"/>
+    <circle cx="120" cy="226" r="2" fill-opacity="0.55"/>
+    <circle cx="188" cy="196" r="2.5" fill-opacity="0.7"/>
+    <circle cx="242" cy="236" r="2" fill-opacity="0.55"/>
+  </g>
+
+  <!-- status chip -->
+  <g transform="translate(72,58)">
+    <rect x="0" y="0" width="332" height="30" rx="15" fill="#0b1a20" stroke="#1e3a3a" stroke-width="1"/>
+    <circle cx="18" cy="15" r="4" fill="#2dd4bf"/>
+    <text x="34" y="20" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" letter-spacing="2" fill="#8fb3ae">SENIOR FULL-STACK ENGINEER</text>
+  </g>
+
+  <!-- title -->
+  <text x="70" y="152" font-family="Georgia, 'Times New Roman', serif" font-size="64" font-weight="600" fill="#eef4f2">Edge Gateway</text>
+  <text x="72" y="196" font-family="Georgia, 'Times New Roman', serif" font-size="22" font-style="italic" fill="#9fb8b3">One Traefik edge · TLS for a whole server · env + label routing</text>
+
+  <!-- tech ticker -->
+  <text x="72" y="238" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" letter-spacing="3" fill="#5f827d">TRAEFIK · DOCKER · LET'S ENCRYPT · ACME · SHELL</text>
+
+  <rect x="72" y="252" width="360" height="2" fill="url(#rule)"/>
+
+  <!-- monogram -->
+  <g transform="translate(1052,178)">
+    <rect x="0" y="0" width="72" height="72" rx="18" fill="#0b1a20" stroke="#1e3a3a" stroke-width="1.5"/>
+    <text x="36" y="47" text-anchor="middle" font-family="Georgia, serif" font-size="30" font-weight="700" fill="#eef4f2">A<tspan fill="#2dd4bf">s</tspan></text>
+    <circle cx="56" cy="16" r="3" fill="#2dd4bf"/>
+  </g>
+</svg>
