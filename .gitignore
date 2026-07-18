@@ -1,6 +1,9 @@
 # Secrets & per-server config
 .env
 
+# Local compose overlay (app-specific data-plane network, alt ports, etc.)
+docker-compose.override.yml
+
 # Let's Encrypt certificate store
 letsencrypt/
 

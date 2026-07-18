@@ -43,6 +43,7 @@ jobs:
           rsync -a --delete \
             --exclude='.git/' \
             --exclude='.env' \
+            --exclude='docker-compose.override.yml' \
             --exclude='letsencrypt/' \
             --exclude='traefik/dynamic/*.yml' \
             --exclude='traefik/dynamic/*.yaml' \

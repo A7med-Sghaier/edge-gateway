@@ -40,17 +40,20 @@ services:
       - ./letsencrypt:/letsencrypt
     networks:
       - web
-      - app-traffic
 
 networks:
   # Generic shared network label-driven / file-route apps join. Create once:
   #   docker network create web
   web:
     external: true
-  # Example second data-plane network for a labelled multi-tenant app. Its tenant
-  # containers attach here and carry Traefik labels (traefik.docker.network=app-traffic),
-  # so this edge discovers and routes them with zero label changes. Rename it to
-  # whatever your app uses; create it (or let the app create it) once by hand:
-  #   docker network create app-traffic
-  app-traffic:
-    external: true
+  # A labelled multi-tenant app usually has its OWN data-plane network (its tenant
+  # containers attach there and carry traefik.docker.network=<net> labels). Don't
+  # hard-code that name here — keep this base file app-agnostic. Instead, attach the
+  # edge to it from a local, gitignored docker-compose.override.yml, e.g.:
+  #   services:
+  #     traefik:
+  #       networks: [web, my-app-traffic]
+  #   networks:
+  #     my-app-traffic:
+  #       external: true
+  # and create it once:  docker network create my-app-traffic
