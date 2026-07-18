@@ -7,3 +7,7 @@ letsencrypt/
 # Generated dynamic config (rendered from .env at runtime)
 traefik/dynamic/*.yml
 traefik/dynamic/*.yaml
+
+# Private, app-specific deployment runbooks (kept out of the public repo)
+*.local.md
+DEPLOY-*.local.md
