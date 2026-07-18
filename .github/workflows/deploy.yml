@@ -1,0 +1,71 @@
+name: Deploy edge-gateway
+
+# Auto-deploy on push to main. Runs on the self-hosted runner that lives ON the
+# target server (installed via scripts/install-runner.sh), so there are no SSH
+# keys or remote secrets — the runner deploys to its own host.
+#
+# Strategy: actions/checkout wipes the runner workspace each run, so we sync the
+# tracked files into a stable DEPLOY_DIR that also holds the server-only state
+# (.env, letsencrypt/ certs, rendered traefik/dynamic/*.yml). Those are never
+# overwritten. Then we re-render routes from .env and reload Traefik.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker-compose.yml"
+      - "traefik/**"
+      - "scripts/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch: {}
+
+# Never run two deploys of the same edge at once.
+concurrency:
+  group: deploy-edge-gateway
+  cancel-in-progress: false
+
+env:
+  DEPLOY_DIR: ${{ vars.DEPLOY_DIR || '$DEPLOY_DIR' }}
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, edge-gateway]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sync tracked files into deploy dir
+        run: |
+          set -euo pipefail
+          mkdir -p "$DEPLOY_DIR"
+          # --delete keeps the deploy dir in sync with the repo, but we exclude the
+          # server-only state so it survives every deploy.
+          rsync -a --delete \
+            --exclude='.git/' \
+            --exclude='.env' \
+            --exclude='letsencrypt/' \
+            --exclude='traefik/dynamic/*.yml' \
+            --exclude='traefik/dynamic/*.yaml' \
+            ./ "$DEPLOY_DIR/"
+
+      - name: Verify server config exists
+        working-directory: ${{ env.DEPLOY_DIR }}
+        run: |
+          set -euo pipefail
+          if [ ! -f .env ]; then
+            echo "::error::$DEPLOY_DIR/.env is missing. Create it from .env.example on the server first (one-time)."
+            exit 1
+          fi
+
+      - name: Render routes + reload edge
+        working-directory: ${{ env.DEPLOY_DIR }}
+        run: |
+          set -euo pipefail
+          docker compose pull --quiet traefik route-generator
+          docker compose run --rm route-generator        # re-renders traefik/dynamic/routes.yml from .env
+          docker compose up -d --remove-orphans           # Traefik hot-reloads; only restarts on compose changes
+
+      - name: Show status
+        if: always()
+        working-directory: ${{ env.DEPLOY_DIR }}
+        run: docker compose ps
