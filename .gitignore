@@ -1,0 +1,9 @@
+# Secrets & per-server config
+.env
+
+# Let's Encrypt certificate store
+letsencrypt/
+
+# Generated dynamic config (rendered from .env at runtime)
+traefik/dynamic/*.yml
+traefik/dynamic/*.yaml
