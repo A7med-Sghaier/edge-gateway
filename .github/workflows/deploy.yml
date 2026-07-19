@@ -62,10 +62,17 @@ jobs:
         working-directory: ${{ env.DEPLOY_DIR }}
         run: |
           set -euo pipefail
-          # The base compose declares the shared `web` network as external, so it must
-          # already exist. Create it if missing (idempotent) — app-specific data-plane
-          # networks stay the override's responsibility.
-          docker network inspect web >/dev/null 2>&1 || docker network create web
+          # Ensure every external network the MERGED compose config references exists.
+          # The base declares the shared `web` net; a server-local
+          # docker-compose.override.yml may add app data-plane nets (e.g. app-traffic).
+          # Creating them here (idempotent) makes the deploy self-healing after a
+          # `docker network prune` or a full `docker system prune`, while keeping the
+          # committed base app-agnostic — the network list is discovered, not hardcoded.
+          docker compose config --format json \
+            | python3 -c 'import sys, json; [print(n.get("name", k)) for k, n in json.load(sys.stdin).get("networks", {}).items() if n.get("external")]' \
+            | while read -r net; do
+                docker network inspect "$net" >/dev/null 2>&1 || docker network create "$net"
+              done
           docker compose pull --quiet traefik route-generator
           docker compose run --rm route-generator        # re-renders traefik/dynamic/routes.yml from .env
           docker compose up -d --remove-orphans           # Traefik hot-reloads; only restarts on compose changes
