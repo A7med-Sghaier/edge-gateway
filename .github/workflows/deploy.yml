@@ -62,6 +62,10 @@ jobs:
         working-directory: ${{ env.DEPLOY_DIR }}
         run: |
           set -euo pipefail
+          # The base compose declares the shared `web` network as external, so it must
+          # already exist. Create it if missing (idempotent) — app-specific data-plane
+          # networks stay the override's responsibility.
+          docker network inspect web >/dev/null 2>&1 || docker network create web
           docker compose pull --quiet traefik route-generator
           docker compose run --rm route-generator        # re-renders traefik/dynamic/routes.yml from .env
           docker compose up -d --remove-orphans           # Traefik hot-reloads; only restarts on compose changes
