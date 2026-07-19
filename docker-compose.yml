@@ -13,6 +13,7 @@ services:
   # hot-reloads the file, no restart needed.
   route-generator:
     image: alpine:3.20
+    container_name: edge-route-generator
     env_file: .env
     volumes:
       - ./scripts/generate-routes.sh:/generate-routes.sh:ro
@@ -22,6 +23,7 @@ services:
 
   traefik:
     image: traefik:v3.3
+    container_name: edge-traefik
     restart: unless-stopped
     depends_on:
       route-generator:

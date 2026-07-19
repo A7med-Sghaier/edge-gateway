@@ -19,17 +19,23 @@ on:
       - ".github/workflows/deploy.yml"
   workflow_dispatch: {}
 
-# Never run two deploys of the same edge at once.
-concurrency:
-  group: deploy-edge-gateway
-  cancel-in-progress: false
-
 env:
   DEPLOY_DIR: ${{ vars.DEPLOY_DIR || '$DEPLOY_DIR' }}
 
 jobs:
   deploy:
-    runs-on: [self-hosted, edge-gateway]
+    strategy:
+      # Deploy to every edge server in parallel; one failing server does not
+      # abort the others.
+      fail-fast: false
+      matrix:
+        server: [edge-a, edge-b]
+    runs-on: [self-hosted, edge-gateway, "${{ matrix.server }}"]
+    # Never run two deploys of the same edge server at once, but let different
+    # servers deploy concurrently.
+    concurrency:
+      group: deploy-edge-gateway-${{ matrix.server }}
+      cancel-in-progress: false
     steps:
       - name: Checkout
         uses: actions/checkout@v5
