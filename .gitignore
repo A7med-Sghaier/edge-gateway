@@ -1,8 +1,10 @@
 # Secrets & per-server config
 .env
 
-# Local compose overlay (app-specific data-plane network, alt ports, etc.)
-docker-compose.override.yml
+# Local compose overlays (app-specific data-plane network, alt ports, etc.)
+# Covers docker-compose.override.yml AND named examples like
+# docker-compose.dev.override.yml — never commit app-specific overlays.
+docker-compose*.override.yml
 
 # Let's Encrypt certificate store
 letsencrypt/
@@ -14,3 +16,5 @@ traefik/dynamic/*.yaml
 # Private, app-specific deployment runbooks (kept out of the public repo)
 *.local.md
 DEPLOY-*.local.md
+
+.idea/
