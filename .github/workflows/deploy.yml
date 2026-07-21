@@ -19,11 +19,11 @@ on:
       - ".github/workflows/deploy.yml"
   workflow_dispatch: {}
 
-env:
-  DEPLOY_DIR: ${{ vars.DEPLOY_DIR || '$DEPLOY_DIR' }}
-
 jobs:
   deploy:
+    name: Deploy edge-gateway to ${{ matrix.server }}
+    environment: production
+
     strategy:
       # Deploy to every edge server in parallel; one failing server does not
       # abort the others.
@@ -36,6 +36,16 @@ jobs:
     concurrency:
       group: deploy-edge-gateway-${{ matrix.server }}
       cancel-in-progress: false
+    
+    env:
+      # Stable deploy dir on the runner's own host (holds server-only state: .env,
+      # letsencrypt/, rendered traefik/dynamic/*.yml). It's a path, not a secret —
+      # override via a `DEPLOY_DIR` env-var/secret, else fall back to the
+      # install-runner.sh default. Everything else compose needs is auto-detected
+      # from this dir: `.env` (incl. ACME_EMAIL), `docker-compose.override.yml`, and
+      # the `name: edge-gateway` project name — so no COMPOSE_*/TRAEFIK_* vars here.
+      DEPLOY_DIR: ${{ secrets.DEPLOY_DIR || vars.DEPLOY_DIR || '$DEPLOY_DIR/' }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v5
