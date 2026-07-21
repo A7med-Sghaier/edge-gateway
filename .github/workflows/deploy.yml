@@ -5,9 +5,10 @@ name: Deploy edge-gateway
 # keys or remote secrets — the runner deploys to its own host.
 #
 # Strategy: actions/checkout wipes the runner workspace each run, so we sync the
-# tracked files into a stable DEPLOY_DIR that also holds the server-only state
-# (.env, letsencrypt/ certs, rendered traefik/dynamic/*.yml). Those are never
-# overwritten. Then we re-render routes from .env and reload Traefik.
+# tracked files into a stable DEPLOY_DIR. That dir also holds the server-only state
+# — letsencrypt/ certs and the hand-authored traefik/dynamic/*.yml — which the sync
+# preserves (never deleted). The .env is written fresh each run from the `production`
+# environment's secrets/vars. Then we re-render routes from .env and reload Traefik.
 
 on:
   push:
@@ -38,12 +39,12 @@ jobs:
       cancel-in-progress: false
     
     env:
-      # Stable deploy dir on the runner's own host (holds server-only state: .env,
-      # letsencrypt/, rendered traefik/dynamic/*.yml). It's a path, not a secret —
-      # override via a `DEPLOY_DIR` env-var/secret, else fall back to the
-      # install-runner.sh default. Everything else compose needs is auto-detected
-      # from this dir: `.env` (incl. ACME_EMAIL), `docker-compose.override.yml`, and
-      # the `name: edge-gateway` project name — so no COMPOSE_*/TRAEFIK_* vars here.
+      # Stable deploy dir on the runner's own host (holds server-only state:
+      # letsencrypt/ certs + hand-authored traefik/dynamic/*.yml). It's a path, not a
+      # secret — override via a `DEPLOY_DIR` env-var/secret, else fall back to the
+      # default. The `.env` is generated below from the environment; the override
+      # (docker-compose.override.yml) and `name: edge-gateway` project name are
+      # auto-detected from this dir, so no COMPOSE_*/TRAEFIK_* vars are needed here.
       DEPLOY_DIR: ${{ secrets.DEPLOY_DIR || vars.DEPLOY_DIR || '$DEPLOY_DIR/' }}
 
     steps:
@@ -65,14 +66,28 @@ jobs:
             --exclude='traefik/dynamic/*.yaml' \
             ./ "$DEPLOY_DIR/"
 
-      - name: Verify server config exists
-        working-directory: ${{ env.DEPLOY_DIR }}
+      - name: Write .env from the production environment
+        # Values arrive via `env:` (NOT interpolated into the script body) so a secret
+        # can't inject shell, and are written with `printf %s` so a DASHBOARD_AUTH
+        # htpasswd hash containing `$` is kept literal. `.env` is excluded from the
+        # rsync above, so this is the only writer of it.
+        env:
+          ACME_EMAIL: ${{ secrets.ACME_EMAIL || secrets.TRAEFIK_EMAIL }}
+          DASHBOARD_HOST: ${{ vars.DASHBOARD_HOST }}
+          DASHBOARD_AUTH: ${{ secrets.DASHBOARD_AUTH }}
         run: |
           set -euo pipefail
-          if [ ! -f .env ]; then
-            echo "::error::$DEPLOY_DIR/.env is missing. Create it from .env.example on the server first (one-time)."
+          if [ -z "${ACME_EMAIL:-}" ]; then
+            echo "::error::ACME_EMAIL is empty. Set secret ACME_EMAIL (or TRAEFIK_EMAIL) in the 'production' environment."
             exit 1
           fi
+          umask 077
+          {
+            printf 'ACME_EMAIL=%s\n' "$ACME_EMAIL"
+            if [ -n "${DASHBOARD_HOST:-}" ]; then printf 'DASHBOARD_HOST=%s\n' "$DASHBOARD_HOST"; fi
+            if [ -n "${DASHBOARD_AUTH:-}" ]; then printf 'DASHBOARD_AUTH=%s\n' "$DASHBOARD_AUTH"; fi
+          } > "$DEPLOY_DIR/.env"
+          chmod 600 "$DEPLOY_DIR/.env"
 
       - name: Render routes + reload edge
         working-directory: ${{ env.DEPLOY_DIR }}
