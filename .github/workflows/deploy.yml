@@ -23,7 +23,7 @@ on:
 jobs:
   deploy:
     name: Deploy edge-gateway to ${{ matrix.server }}
-    environment: production
+    environment: Prod
 
     strategy:
       # Deploy to every edge server in parallel; one failing server does not
