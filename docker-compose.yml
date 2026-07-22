@@ -14,7 +14,13 @@ services:
   route-generator:
     image: alpine:3.20
     container_name: edge-route-generator
-    env_file: .env
+    # Env file compose reads for the ROUTE_*/DASHBOARD_* vars. Defaults to the
+    # project-dir .env, but the deploy points COMPOSE_ENV at a server-local path
+    # (kept OUTSIDE DEPLOY_DIR so the rsync --delete can't touch it). required:false
+    # keeps a deploy coming up when all config lives in COMPOSE_ENV / labels.
+    env_file:
+      - path: ${COMPOSE_ENV:-.env}
+        required: false
     volumes:
       - ./scripts/generate-routes.sh:/generate-routes.sh:ro
       - ./traefik/dynamic:/out

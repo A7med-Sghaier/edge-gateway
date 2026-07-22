@@ -7,8 +7,10 @@ name: Deploy edge-gateway
 # Strategy: actions/checkout wipes the runner workspace each run, so we sync the
 # tracked files into a stable DEPLOY_DIR. That dir also holds the server-only state
 # — letsencrypt/ certs and the hand-authored traefik/dynamic/*.yml — which the sync
-# preserves (never deleted). The .env is written fresh each run from the `production`
-# environment's secrets/vars. Then we re-render routes from .env and reload Traefik.
+# preserves (never deleted). The .env (COMPOSE_ENV) and the gitignored override
+# (COMPOSE_OVERRIDE) are configured to live OUTSIDE DEPLOY_DIR so the rsync --delete
+# can never touch them; the .env is (re)written fresh each run from the `Prod`
+# environment's secrets/vars. Then we re-render routes and reload Traefik.
 
 on:
   push:
@@ -39,13 +41,23 @@ jobs:
       cancel-in-progress: false
     
     env:
-      # Stable deploy dir on the runner's own host (holds server-only state:
-      # letsencrypt/ certs + hand-authored traefik/dynamic/*.yml). It's a path, not a
-      # secret — override via a `DEPLOY_DIR` env-var/secret, else fall back to the
-      # default. The `.env` is generated below from the environment; the override
-      # (docker-compose.override.yml) and `name: edge-gateway` project name are
-      # auto-detected from this dir, so no COMPOSE_*/TRAEFIK_* vars are needed here.
+      # Stable deploy dir on the runner's own host — CI rsyncs the tracked repo here
+      # (base docker-compose.yml, scripts, traefik static config) and it holds the
+      # letsencrypt/ certs. It's a path, not a secret — override via env-var/secret.
       DEPLOY_DIR: ${{ secrets.DEPLOY_DIR || vars.DEPLOY_DIR || '$DEPLOY_DIR/' }}
+      # Server-local files kept OUTSIDE DEPLOY_DIR so the `rsync --delete` can never
+      # touch them. Set as environment VARIABLES in the `Prod` environment:
+      #   COMPOSE_ENV       abs path to the .env compose reads   (e.g. $RUNTIME_CONFIG_DIR/.env)
+      #   COMPOSE_OVERRIDE  abs path to the gitignored override  (e.g. $RUNTIME_CONFIG_DIR/docker-compose.override.yml)
+      # COMPOSE_OVERRIDE is what attaches this edge to the app data-plane network(s);
+      # without it Traefik comes up on `web` only and every labelled backend 504s.
+      # Both optional: unset COMPOSE_OVERRIDE → base compose only (app-agnostic);
+      # unset COMPOSE_ENV → falls back to DEPLOY_DIR/.env.
+      COMPOSE_ENV: ${{ vars.COMPOSE_ENV }}
+      COMPOSE_OVERRIDE: ${{ vars.COMPOSE_OVERRIDE }}
+      # Native compose var → pins the project name (and thus container names)
+      # regardless of cwd. Defaults to the base compose's `name:`.
+      COMPOSE_PROJECT_NAME: ${{ vars.COMPOSE_PROJECT_NAME || 'edge-gateway' }}
 
     steps:
       - name: Checkout
@@ -66,11 +78,32 @@ jobs:
             --exclude='traefik/dynamic/*.yaml' \
             ./ "$DEPLOY_DIR/"
 
-      - name: Write .env from the production environment
+      - name: Resolve compose invocation
+        # Build the flags every later `docker compose` call shares, from the Prod
+        # variables: the env file to read and the server-local override to merge.
+        # Fails loudly if COMPOSE_OVERRIDE is set but missing — the exact silent
+        # failure (Traefik off the data-plane net → tenant 504s) that this guards.
+        working-directory: ${{ env.DEPLOY_DIR }}
+        run: |
+          set -euo pipefail
+          env_path="${COMPOSE_ENV:-$DEPLOY_DIR/.env}"
+          args="-f docker-compose.yml"
+          if [ -n "${COMPOSE_OVERRIDE:-}" ]; then
+            if [ ! -f "$COMPOSE_OVERRIDE" ]; then
+              echo "::error::COMPOSE_OVERRIDE points at '$COMPOSE_OVERRIDE' but that file does not exist on $(hostname -s). It attaches this edge to the app data-plane network — create it (see DEPLOY-<server>.local.md) or clear the COMPOSE_OVERRIDE variable."
+              exit 1
+            fi
+            args="$args -f $COMPOSE_OVERRIDE"
+          fi
+          # --env-file first so ${ACME_EMAIL} interpolation resolves. Persist for later steps.
+          echo "ENV_PATH=$env_path" >> "$GITHUB_ENV"
+          echo "COMPOSE_ARGS=--env-file $env_path $args" >> "$GITHUB_ENV"
+
+      - name: Write .env from the Prod environment
         # Values arrive via `env:` (NOT interpolated into the script body) so a secret
         # can't inject shell, and are written with `printf %s` so a DASHBOARD_AUTH
-        # htpasswd hash containing `$` is kept literal. `.env` is excluded from the
-        # rsync above, so this is the only writer of it.
+        # htpasswd hash containing `$` is kept literal. Written to ENV_PATH (COMPOSE_ENV),
+        # which is outside the rsync tree, so this is the only writer of it.
         env:
           ACME_EMAIL: ${{ secrets.ACME_EMAIL || secrets.TRAEFIK_EMAIL }}
           DASHBOARD_HOST: ${{ vars.DASHBOARD_HOST }}
@@ -78,16 +111,18 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${ACME_EMAIL:-}" ]; then
-            echo "::error::ACME_EMAIL is empty. Set secret ACME_EMAIL (or TRAEFIK_EMAIL) in the 'production' environment."
+            echo "::error::ACME_EMAIL is empty. Set secret ACME_EMAIL (or TRAEFIK_EMAIL) in the 'Prod' environment."
             exit 1
           fi
+          mkdir -p "$(dirname "$ENV_PATH")" 2>/dev/null || {
+            echo "::error::cannot create $(dirname "$ENV_PATH") — make it writable by the runner user (once): sudo chown -R \$(id -un) $(dirname "$ENV_PATH")"; exit 1; }
           umask 077
           {
             printf 'ACME_EMAIL=%s\n' "$ACME_EMAIL"
             if [ -n "${DASHBOARD_HOST:-}" ]; then printf 'DASHBOARD_HOST=%s\n' "$DASHBOARD_HOST"; fi
             if [ -n "${DASHBOARD_AUTH:-}" ]; then printf 'DASHBOARD_AUTH=%s\n' "$DASHBOARD_AUTH"; fi
-          } > "$DEPLOY_DIR/.env"
-          chmod 600 "$DEPLOY_DIR/.env"
+          } > "$ENV_PATH"
+          chmod 600 "$ENV_PATH"
 
       - name: Render routes + reload edge
         working-directory: ${{ env.DEPLOY_DIR }}
@@ -99,16 +134,37 @@ jobs:
           # Creating them here (idempotent) makes the deploy self-healing after a
           # `docker network prune` or a full `docker system prune`, while keeping the
           # committed base app-agnostic — the network list is discovered, not hardcoded.
-          docker compose config --format json \
+          docker compose $COMPOSE_ARGS config --format json \
             | python3 -c 'import sys, json; [print(n.get("name", k)) for k, n in json.load(sys.stdin).get("networks", {}).items() if n.get("external")]' \
             | while read -r net; do
                 docker network inspect "$net" >/dev/null 2>&1 || docker network create "$net"
               done
-          docker compose pull --quiet traefik route-generator
-          docker compose run --rm route-generator        # re-renders traefik/dynamic/routes.yml from .env
-          docker compose up -d --remove-orphans           # Traefik hot-reloads; only restarts on compose changes
+          docker compose $COMPOSE_ARGS pull --quiet traefik route-generator
+          docker compose $COMPOSE_ARGS run --rm route-generator   # re-renders traefik/dynamic/routes.yml from COMPOSE_ENV
+          docker compose $COMPOSE_ARGS up -d --remove-orphans      # Traefik hot-reloads; only restarts on compose changes
+
+      - name: Verify the edge joined every network its config declares
+        # The incident this whole workflow rev fixes: Traefik silently came up on `web`
+        # only (override not merged) and every labelled backend on app-traffic 504'd.
+        # Assert the running container is on all networks the MERGED config assigns to it.
+        working-directory: ${{ env.DEPLOY_DIR }}
+        run: |
+          set -euo pipefail
+          want="$(docker compose $COMPOSE_ARGS config --format json \
+            | python3 -c 'import sys, json; s=json.load(sys.stdin)["services"]["traefik"]; print("\n".join((s.get("networks") or {}).keys()))')"
+          cid="$(docker compose $COMPOSE_ARGS ps -q traefik)"
+          have="$(docker inspect "$cid" --format '{{range $n,$c := .NetworkSettings.Networks}}{{$n}}{{"\n"}}{{end}}')"
+          missing=""
+          for n in $want; do
+            printf '%s\n' "$have" | grep -qx "$n" || missing="$missing $n"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::edge-traefik is NOT attached to:$missing — the override did not merge. Every labelled backend on those networks will 504. Check the COMPOSE_OVERRIDE variable and file."
+            exit 1
+          fi
+          echo "OK: edge-traefik attached to all declared networks ($(printf '%s' "$want" | tr '\n' ' '))"
 
       - name: Show status
         if: always()
         working-directory: ${{ env.DEPLOY_DIR }}
-        run: docker compose ps
+        run: docker compose ${COMPOSE_ARGS:--f docker-compose.yml} ps
