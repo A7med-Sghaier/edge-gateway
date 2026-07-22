@@ -99,30 +99,38 @@ jobs:
           echo "ENV_PATH=$env_path" >> "$GITHUB_ENV"
           echo "COMPOSE_ARGS=--env-file $env_path $args" >> "$GITHUB_ENV"
 
-      - name: Write .env from the Prod environment
-        # Values arrive via `env:` (NOT interpolated into the script body) so a secret
-        # can't inject shell, and are written with `printf %s` so a DASHBOARD_AUTH
-        # htpasswd hash containing `$` is kept literal. Written to ENV_PATH (COMPOSE_ENV),
-        # which is outside the rsync tree, so this is the only writer of it.
+      - name: Ensure .env is present (write from secrets, or verify if root-managed)
+        # COMPOSE_ENV may be a root-managed file the runner can only READ (the single
+        # source of secrets on the host, e.g. root:github-runner rw-r-----). If we CAN
+        # write it, (re)generate it from the Prod secrets; if not, treat it as externally
+        # managed and just validate it. Values arrive via env: (NOT interpolated into the
+        # script body) so a secret can't inject shell, and are written with printf %s so a
+        # DASHBOARD_AUTH htpasswd hash containing `$` stays literal.
         env:
           ACME_EMAIL: ${{ secrets.ACME_EMAIL || secrets.TRAEFIK_EMAIL }}
           DASHBOARD_HOST: ${{ vars.DASHBOARD_HOST }}
           DASHBOARD_AUTH: ${{ secrets.DASHBOARD_AUTH }}
         run: |
           set -euo pipefail
-          if [ -z "${ACME_EMAIL:-}" ]; then
-            echo "::error::ACME_EMAIL is empty. Set secret ACME_EMAIL (or TRAEFIK_EMAIL) in the 'Prod' environment."
-            exit 1
+          if [ -w "$ENV_PATH" ] || { [ ! -e "$ENV_PATH" ] && mkdir -p "$(dirname "$ENV_PATH")" 2>/dev/null && [ -w "$(dirname "$ENV_PATH")" ]; }; then
+            if [ -z "${ACME_EMAIL:-}" ]; then
+              echo "::error::ACME_EMAIL is empty. Set secret ACME_EMAIL (or TRAEFIK_EMAIL) in the 'Prod' environment, or pre-provision $ENV_PATH on the host."
+              exit 1
+            fi
+            umask 077
+            {
+              printf 'ACME_EMAIL=%s\n' "$ACME_EMAIL"
+              if [ -n "${DASHBOARD_HOST:-}" ]; then printf 'DASHBOARD_HOST=%s\n' "$DASHBOARD_HOST"; fi
+              if [ -n "${DASHBOARD_AUTH:-}" ]; then printf 'DASHBOARD_AUTH=%s\n' "$DASHBOARD_AUTH"; fi
+            } > "$ENV_PATH"
+            chmod 600 "$ENV_PATH"
+            echo "Wrote $ENV_PATH from Prod secrets."
+          else
+            # Read-only to the runner → root-managed on the host. Validate, don't touch.
+            [ -s "$ENV_PATH" ] || { echo "::error::$ENV_PATH is missing/empty and not writable by the runner — provision it on the host (must contain ACME_EMAIL=…)."; exit 1; }
+            grep -q '^ACME_EMAIL=' "$ENV_PATH" || echo "::warning::$ENV_PATH has no ACME_EMAIL= line — Traefik ACME may fail."
+            echo "Using externally-managed $ENV_PATH (not writable by runner) — left as-is."
           fi
-          mkdir -p "$(dirname "$ENV_PATH")" 2>/dev/null || {
-            echo "::error::cannot create $(dirname "$ENV_PATH") — make it writable by the runner user (once): sudo chown -R \$(id -un) $(dirname "$ENV_PATH")"; exit 1; }
-          umask 077
-          {
-            printf 'ACME_EMAIL=%s\n' "$ACME_EMAIL"
-            if [ -n "${DASHBOARD_HOST:-}" ]; then printf 'DASHBOARD_HOST=%s\n' "$DASHBOARD_HOST"; fi
-            if [ -n "${DASHBOARD_AUTH:-}" ]; then printf 'DASHBOARD_AUTH=%s\n' "$DASHBOARD_AUTH"; fi
-          } > "$ENV_PATH"
-          chmod 600 "$ENV_PATH"
 
       - name: Render routes + reload edge
         working-directory: ${{ env.DEPLOY_DIR }}
