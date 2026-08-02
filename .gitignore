@@ -13,6 +13,10 @@ letsencrypt/
 traefik/dynamic/*.yml
 traefik/dynamic/*.yaml
 
+# Server-only host nginx SPA configs — live in $DEPLOY_DIR/nginx on the box
+# (and get symlinked/copied into /etc/nginx). Never committed to the public repo.
+nginx/*.conf
+
 # Private, app-specific deployment runbooks (kept out of the public repo)
 *.local.md
 DEPLOY-*.local.md
