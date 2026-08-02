@@ -1,20 +1,25 @@
 name: edge-gateway
 
 # Single edge reverse-proxy for a whole server.
-# - `route-generator` renders Traefik dynamic config from the routes declared in .env
+# - `route-generator` renders Traefik dynamic config + the edge-spa nginx config
+#   from the ROUTE_*/APP_* entries in .env
 # - `traefik` is the ONLY thing that binds :80 / :443 and owns all TLS certs
+# - `edge-spa` serves the non-dockerized frontend SPA builds (bind-mounted from
+#   the host's /var/www) so Traefik reaches them by container name — no host ports
 #
 # Every backend app joins the shared external `web` network so Traefik can reach it
-# by container name (e.g. http://dashboard:8080).
+# by container name (e.g. http://dashboard:8080, http://edge-spa:80).
 
 services:
-  # Renders ./traefik/dynamic/routes.yml from the ROUTE_* entries in .env, then exits.
-  # Re-run it (`docker compose run --rm route-generator`) after editing .env — Traefik
-  # hot-reloads the file, no restart needed.
+  # Renders ./traefik/dynamic/routes.yml (Traefik routers) AND ./nginx/generated/spa.conf
+  # (edge-spa server blocks) from the ROUTE_*/APP_*/DASHBOARD_* entries in .env, then
+  # exits. Re-run it (`docker compose run --rm route-generator`) after editing .env —
+  # Traefik hot-reloads its file; the edge-spa nginx needs `nginx -s reload` (the deploy
+  # does this).
   route-generator:
     image: alpine:3.20
     container_name: edge-route-generator
-    # Env file compose reads for the ROUTE_*/DASHBOARD_* vars. Defaults to the
+    # Env file compose reads for the ROUTE_*/APP_*/DASHBOARD_* vars. Defaults to the
     # project-dir .env, but the deploy points COMPOSE_ENV at a server-local path
     # (kept OUTSIDE DEPLOY_DIR so the rsync --delete can't touch it). required:false
     # keeps a deploy coming up when all config lives in COMPOSE_ENV / labels.
@@ -24,8 +29,29 @@ services:
     volumes:
       - ./scripts/generate-routes.sh:/generate-routes.sh:ro
       - ./traefik/dynamic:/out
-    command: sh /generate-routes.sh /out/routes.yml
+      - ./nginx/generated:/nginx-out
+    command: sh /generate-routes.sh /out/routes.yml /nginx-out/spa.conf
     restart: "no"
+
+  # Static file server for the NON-dockerized frontend SPAs. Serves the build dirs
+  # under the host's /var/www (bind-mounted read-only) using server_name-routed blocks
+  # generated into ./nginx/generated/spa.conf. Traefik routes each APP_* host here by
+  # container name (http://edge-spa:80) — no published ports, no host.docker.internal,
+  # no ufw docker->host rule needed for SPAs.
+  edge-spa:
+    image: nginx:1.27-alpine
+    container_name: edge-spa
+    restart: unless-stopped
+    depends_on:
+      route-generator:
+        condition: service_completed_successfully
+    volumes:
+      # Mount the generated dir (not the file) so a missing spa.conf can't be
+      # created as a directory on first boot.
+      - ./nginx/generated:/etc/nginx/conf.d:ro
+      - /var/www:/var/www:ro
+    networks:
+      - web
 
   traefik:
     image: traefik:v3.7.8
@@ -41,10 +67,11 @@ services:
     ports:
       - "80:80"
       - "443:443"
-    # NON-dockerized backends (host processes: the SPA nginx ports in
-    # traefik/dynamic/*.yml and the API ports in *-api.yml) are reached via
-    # host.docker.internal. On Linux that name isn't built in — this maps it to
-    # the host gateway so the container can dial host ports. No-op on Docker Desktop.
+    # NON-dockerized API backends (host processes; the APP_*_API ports rendered
+    # into traefik/dynamic/routes.yml) are reached via host.docker.internal. On
+    # Linux that name isn't built in — this maps it to the host gateway so the
+    # container can dial host ports. No-op on Docker Desktop. (The SPAs no longer
+    # use it — they're served by the edge-spa container over the `web` network.)
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

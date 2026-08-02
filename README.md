@@ -30,7 +30,9 @@ forwards every inbound request to the right backend through **two complementary
 providers**: a **file provider** driven by one `.env` file for label-less apps, and a
 **Docker provider** that auto-discovers any container already carrying Traefik labels —
 so a multi-tenant app that already ships its own labels plugs in with **zero label
-changes**.
+changes**. It also bundles a small **`edge-spa` nginx** that serves non-dockerized
+frontend builds from the host's `/var/www`, so static SPAs need no per-app web server —
+their routes, admin variants, and API/socket.io proxying are declared in the same `.env`.
 
 This repository is currently private while it is prepared as a portfolio case study.
 
@@ -63,11 +65,14 @@ flowchart TD
   Docker --> Tenants["Multi-tenant app<br/>(its own Traefik labels — unchanged)"]
   Docker --> Other["Any other labelled Docker app (on web)"]
   Edge -->|file provider<br/>routes.yml ← .env| File["Label-less apps<br/>dashboard, external URLs, …"]
+  Edge -->|file provider<br/>APP_* ← .env| Spa["edge-spa (nginx)<br/>static SPA builds from /var/www"]
+  Spa -.->|/api · /socket.io| Api["Host API processes<br/>(host.docker.internal)"]
 ```
 
 | Provider | Used for | How routing is declared |
 | --- | --- | --- |
 | **File** | Apps with **no** Traefik labels | `ROUTE_*` blocks in `.env` → rendered to `traefik/dynamic/routes.yml`, hot-reloaded |
+| **File** | Static frontend SPAs (served by `edge-spa`) | `APP_*` blocks in `.env` → nginx server blocks + web/admin/API routers, hot-reloaded |
 | **Docker** | Apps that **already** ship Traefik labels | Auto-discovered on `web` / `app-traffic`; `traefik.enable=true` opt-in |
 
 ## Tech Stack
@@ -77,8 +82,9 @@ flowchart TD
 | Reverse proxy | Traefik v3.7 (file + Docker providers, TLS entrypoints) |
 | TLS | Let's Encrypt / ACME, TLS-ALPN challenge, optional DNS-01 wildcard |
 | Runtime | Docker Compose, shared external networks (`web`, `app-traffic`) |
-| Route generation | POSIX `sh` script on Alpine 3.20, rendering Traefik dynamic config |
-| Configuration | `.env` file-provider blocks + Docker labels |
+| Static SPA serving | `nginx:1.27-alpine` (`edge-spa`), builds bind-mounted from host `/var/www` |
+| Route generation | POSIX `sh` script on Alpine 3.20, rendering Traefik dynamic config + edge-spa nginx config |
+| Configuration | `.env` file-provider blocks (`ROUTE_*`, `APP_*`) + Docker labels |
 
 <div align="center"><img src="./assets/divider.svg" width="70%" alt="" /></div>
 
@@ -91,6 +97,15 @@ flowchart TD
 - Traefik watches that file and hot-reloads — add a route without restarting Traefik.
 - Backends are reached by **container name** over the shared `web` network
   (e.g. `http://dashboard:8080`), or by any external URL.
+
+**Static SPAs (`APP_*` → `edge-spa`):**
+- Each `APP_*` block renders (1) an nginx `server{}` per web/admin host into
+  `nginx/generated/spa.conf` (served by the `edge-spa` container from the host's
+  bind-mounted `/var/www`) and (2) Traefik routers: a web/admin router → `edge-spa`,
+  plus — when `APP_N_API` is set — an `/api` + `/socket.io` router → that API
+  backend with a CORS middleware.
+- Traefik reaches `edge-spa` by container name over `web` (`http://edge-spa:80`); there
+  are no host ports. The `edge-spa` nginx is reloaded on deploy when its config changes.
 
 **Label-driven apps (Docker provider):**
 - Any container with `traefik.enable=true` on the `web` or `app-traffic` network is
@@ -135,14 +150,16 @@ labelled containers on `web` / `app-traffic`.
 
 ## Add / change a route
 
-1. Edit the `ROUTE_*` blocks in `.env`.
+1. Edit the `ROUTE_*` (proxied apps) or `APP_*` (static SPAs) blocks in `.env`.
 2. Regenerate the dynamic config (Traefik picks it up live):
 
 ```bash
 docker compose run --rm route-generator
+# APP_* changes also update the edge-spa nginx config — reload it to apply:
+docker compose exec edge-spa nginx -t && docker compose exec edge-spa nginx -s reload
 ```
 
-No Traefik restart needed.
+No Traefik restart needed. (The deploy workflow runs the reload for you.)
 
 ## Connect a label-less app to the gateway
 
@@ -233,14 +250,16 @@ the Traefik ACME `dnsChallenge` docs. The env-driven routing here stays identica
 
 ```text
 edge-gateway/
-├── docker-compose.yml         # route-generator + traefik
-├── .env.example               # copy to .env — routes + ACME email live here
+├── docker-compose.yml         # route-generator + traefik + edge-spa
+├── .env.example               # copy to .env — ROUTE_*/APP_* routes + ACME email
 ├── assets/                    # README banner + divider (SVG)
 ├── traefik/
 │   ├── traefik.yml            # static config (entrypoints, ACME, providers)
 │   └── dynamic/               # generated routes.yml (gitignored)
+├── nginx/
+│   └── generated/             # generated spa.conf for edge-spa (gitignored)
 └── scripts/
-    └── generate-routes.sh     # .env  →  Traefik dynamic config
+    └── generate-routes.sh     # .env  →  Traefik dynamic config + edge-spa nginx config
 ```
 
 ## License

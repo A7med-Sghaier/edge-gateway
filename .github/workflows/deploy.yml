@@ -6,8 +6,8 @@ name: Deploy edge-gateway
 #
 # Strategy: actions/checkout wipes the runner workspace each run, so we sync the
 # tracked files into a stable DEPLOY_DIR. That dir also holds the server-only state
-# — letsencrypt/ certs, the hand-authored traefik/dynamic/*.yml, and the host nginx SPA
-# configs nginx/*.conf — which the sync preserves (never deleted). The .env (COMPOSE_ENV) and the gitignored override
+# — letsencrypt/ certs, the hand-authored traefik/dynamic/*.yml, and the generated
+# nginx/generated/ SPA config — which the sync preserves (never deleted). The .env (COMPOSE_ENV) and the gitignored override
 # (COMPOSE_OVERRIDE) are configured to live OUTSIDE DEPLOY_DIR so the rsync --delete
 # can never touch them; the .env is (re)written fresh each run from the `Prod`
 # environment's secrets/vars. Then we re-render routes and reload Traefik.
@@ -76,7 +76,7 @@ jobs:
             --exclude='letsencrypt/' \
             --exclude='traefik/dynamic/*.yml' \
             --exclude='traefik/dynamic/*.yaml' \
-            --exclude='nginx/*.conf' \
+            --exclude='nginx/generated/' \
             ./ "$DEPLOY_DIR/"
 
       - name: Resolve compose invocation
@@ -148,9 +148,16 @@ jobs:
             | while read -r net; do
                 docker network inspect "$net" >/dev/null 2>&1 || docker network create "$net"
               done
-          docker compose $COMPOSE_ARGS pull --quiet traefik route-generator
-          docker compose $COMPOSE_ARGS run --rm route-generator   # re-renders traefik/dynamic/routes.yml from COMPOSE_ENV
+          docker compose $COMPOSE_ARGS pull --quiet traefik route-generator edge-spa
+          docker compose $COMPOSE_ARGS run --rm route-generator   # re-renders traefik/dynamic/routes.yml + nginx/generated/spa.conf from COMPOSE_ENV
           docker compose $COMPOSE_ARGS up -d --remove-orphans      # Traefik hot-reloads; only restarts on compose changes
+          # Traefik hot-reloads routes.yml on its own, but edge-spa nginx must be told
+          # to re-read the regenerated spa.conf when the container wasn't recreated
+          # (e.g. a pure .env change). Validate first; skip cleanly if edge-spa isn't up.
+          if docker compose $COMPOSE_ARGS ps -q edge-spa | grep -q .; then
+            docker compose $COMPOSE_ARGS exec -T edge-spa nginx -t \
+              && docker compose $COMPOSE_ARGS exec -T edge-spa nginx -s reload
+          fi
 
       - name: Verify the edge joined every network its config declares
         # The incident this whole workflow rev fixes: Traefik silently came up on `web`
