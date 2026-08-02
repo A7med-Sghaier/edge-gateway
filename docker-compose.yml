@@ -41,6 +41,12 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    # NON-dockerized backends (host processes: the SPA nginx ports in
+    # traefik/dynamic/*.yml and the API ports in *-api.yml) are reached via
+    # host.docker.internal. On Linux that name isn't built in — this maps it to
+    # the host gateway so the container can dial host ports. No-op on Docker Desktop.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
