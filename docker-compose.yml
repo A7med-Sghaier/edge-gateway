@@ -28,7 +28,7 @@ services:
     restart: "no"
 
   traefik:
-    image: traefik:v3.3
+    image: traefik:v3.7.8
     container_name: edge-traefik
     restart: unless-stopped
     depends_on:
