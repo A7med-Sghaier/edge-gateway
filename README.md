@@ -10,7 +10,7 @@
 
 <br/><br/>
 
-[![Traefik](https://img.shields.io/badge/Traefik-v3.3-24A1C1?style=for-the-badge&logo=traefikproxy&logoColor=white)](https://traefik.io)
+[![Traefik](https://img.shields.io/badge/Traefik-v3.7-24A1C1?style=for-the-badge&logo=traefikproxy&logoColor=white)](https://traefik.io)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com)
 [![Let's Encrypt](https://img.shields.io/badge/Let's_Encrypt-ACME-003A70?style=for-the-badge&logo=letsencrypt&logoColor=white)](https://letsencrypt.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-EAB308?style=for-the-badge)](LICENSE)
@@ -74,7 +74,7 @@ flowchart TD
 
 | Area | Technology |
 | --- | --- |
-| Reverse proxy | Traefik v3.3 (file + Docker providers, TLS entrypoints) |
+| Reverse proxy | Traefik v3.7 (file + Docker providers, TLS entrypoints) |
 | TLS | Let's Encrypt / ACME, TLS-ALPN challenge, optional DNS-01 wildcard |
 | Runtime | Docker Compose, shared external networks (`web`, `app-traffic`) |
 | Route generation | POSIX `sh` script on Alpine 3.20, rendering Traefik dynamic config |
