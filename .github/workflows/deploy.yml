@@ -4,13 +4,22 @@ name: Deploy edge-gateway
 # target server (installed via scripts/install-runner.sh), so there are no SSH
 # keys or remote secrets — the runner deploys to its own host.
 #
-# Strategy: actions/checkout wipes the runner workspace each run, so we sync the
-# tracked files into a stable DEPLOY_DIR. That dir also holds the server-only state
-# — letsencrypt/ certs, the hand-authored traefik/dynamic/*.yml, and the generated
-# nginx/generated/ SPA config — which the sync preserves (never deleted). The .env (COMPOSE_ENV) and the gitignored override
-# (COMPOSE_OVERRIDE) are configured to live OUTSIDE DEPLOY_DIR so the rsync --delete
-# can never touch them; the .env is (re)written fresh each run from the `Prod`
-# environment's secrets/vars. Then we re-render routes and reload Traefik.
+# Path responsibilities (all values come from the `Prod` environment — this file
+# never contains a concrete server path, and never a fallback for one):
+#   RUNNER_DIR          the runner software install — never a deploy target
+#   DEPLOY_DIR          synced application source (rsync --delete destination)
+#   RUNTIME_CONFIG_DIR  server-managed config; holds the base env file and the
+#                       compose override. Must live OUTSIDE DEPLOY_DIR.
+#
+# Env assembly: CI NEVER writes the server's env file. Each job copies the
+# server-managed base verbatim, appends the GitHub overlay after it (compose takes
+# the LAST occurrence of a duplicate key, so GitHub wins), and writes the result to
+# $RUNNER_TEMP — which is destroyed with the job, so the one place both layers meet
+# on disk does not persist.
+#
+# DEPLOY_DIR also holds server-only state — letsencrypt/ certs, hand-authored
+# traefik/dynamic/*.yml, and the generated nginx/generated/ SPA config — which the
+# rsync excludes protect from --delete.
 
 on:
   push:
@@ -33,137 +42,392 @@ jobs:
       fail-fast: false
       matrix:
         server: [edge-a, edge-b]
+
+    # NOTE: GitHub resolves `runs-on` BEFORE applying the job's `environment:`, so an
+    # environment-scoped variable here (vars.SERVER_LABEL) would expand to an empty
+    # string, `runs-on` would be unschedulable, and the job would never be created —
+    # the run fails with no job listed and no annotation. These matrix values are
+    # literals, which is why this works. Do not replace them with an environment
+    # variable; a repository-scoped variable would be required.
     runs-on: [self-hosted, edge-gateway, "${{ matrix.server }}"]
+
     # Never run two deploys of the same edge server at once, but let different
     # servers deploy concurrently.
     concurrency:
       group: deploy-edge-gateway-${{ matrix.server }}
       cancel-in-progress: false
-    
+
     env:
-      # Stable deploy dir on the runner's own host — CI rsyncs the tracked repo here
-      # (base docker-compose.yml, scripts, traefik static config) and it holds the
-      # letsencrypt/ certs. It's a path, not a secret — override via env-var/secret.
-      DEPLOY_DIR: ${{ secrets.DEPLOY_DIR || vars.DEPLOY_DIR || '$DEPLOY_DIR/' }}
-      # Server-local files kept OUTSIDE DEPLOY_DIR so the `rsync --delete` can never
-      # touch them. Set as environment VARIABLES in the `Prod` environment:
-      #   COMPOSE_ENV       abs path to the .env compose reads   (e.g. $RUNTIME_CONFIG_DIR/.env)
-      #   COMPOSE_OVERRIDE  abs path to the gitignored override  (e.g. $RUNTIME_CONFIG_DIR/docker-compose.override.yml)
-      # COMPOSE_OVERRIDE is what attaches this edge to the app data-plane network(s);
-      # without it Traefik comes up on `web` only and every labelled backend 504s.
-      # Both optional: unset COMPOSE_OVERRIDE → base compose only (app-agnostic);
-      # unset COMPOSE_ENV → falls back to DEPLOY_DIR/.env.
-      COMPOSE_ENV: ${{ vars.COMPOSE_ENV }}
-      COMPOSE_OVERRIDE: ${{ vars.COMPOSE_OVERRIDE }}
-      # Native compose var → pins the project name (and thus container names)
-      # regardless of cwd. Defaults to the base compose's `name:`.
-      COMPOSE_PROJECT_NAME: ${{ vars.COMPOSE_PROJECT_NAME || 'edge-gateway' }}
+      # Mapped with NO fallback values — a missing variable must fail the job loudly
+      # rather than silently resolve to a guessed path.
+      APP_NAME: ${{ vars.APP_NAME }}
+      RUNNER_DIR: ${{ vars.RUNNER_DIR }}
+      DEPLOY_DIR: ${{ vars.DEPLOY_DIR }}
+      RUNTIME_CONFIG_DIR: ${{ vars.RUNTIME_CONFIG_DIR }}
+      COMPOSE_PROJECT_NAME: ${{ vars.COMPOSE_PROJECT_NAME }}
+      # Optional overrides. When unset, both derive from RUNTIME_CONFIG_DIR in
+      # "Resolve and validate deployment configuration" — derived from a variable,
+      # never from a hardcoded prefix.
+      COMPOSE_ENV_VAR: ${{ vars.COMPOSE_ENV }}
+      COMPOSE_OVERRIDE_VAR: ${{ vars.COMPOSE_OVERRIDE }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Sync tracked files into deploy dir
+      - name: Resolve and validate deployment configuration
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$DEPLOY_DIR"
-          # --delete keeps the deploy dir in sync with the repo, but we exclude the
-          # server-only state so it survives every deploy.
+
+          # GitHub variables keep whatever whitespace was pasted into the UI. A
+          # trailing CR/newline is invisible there but lands inside any path built
+          # from it — a `file://…/\r\n/compose-spec.json` schema URL once failed
+          # every deploy with "net/url: invalid control character in URL". Strip it
+          # from every path-ish value before it is used for anything.
+          sanitize() {
+            printf '%s' "${1:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+          }
+          # Paths are compared by prefix below, so normalise away trailing slashes
+          # (`/a/b/` vs `/a/b`) — otherwise the separation checks silently pass.
+          strip_slash() {
+            printf '%s' "${1%"${1##*[!/]}"}"
+          }
+
+          APP_NAME="$(sanitize "${APP_NAME:-}")"
+          COMPOSE_PROJECT_NAME="$(sanitize "${COMPOSE_PROJECT_NAME:-}")"
+          RUNNER_DIR="$(strip_slash "$(sanitize "${RUNNER_DIR:-}")")"
+          DEPLOY_DIR="$(strip_slash "$(sanitize "${DEPLOY_DIR:-}")")"
+          RUNTIME_CONFIG_DIR="$(strip_slash "$(sanitize "${RUNTIME_CONFIG_DIR:-}")")"
+
+          # ── Required variables ──────────────────────────────────────────────
+          required_variables=(
+            APP_NAME
+            RUNNER_DIR
+            DEPLOY_DIR
+            RUNTIME_CONFIG_DIR
+            COMPOSE_PROJECT_NAME
+          )
+          missing=0
+          for variable_name in "${required_variables[@]}"; do
+            if [[ -z "${!variable_name:-}" ]]; then
+              echo "::error::Required deployment variable is missing: ${variable_name} (set it in the 'Prod' environment)"
+              missing=1
+            fi
+          done
+          [[ "$missing" -eq 0 ]] || exit 1
+
+          # Derive the server-managed paths from RUNTIME_CONFIG_DIR unless the
+          # environment pins them explicitly.
+          BASE_ENV="$(strip_slash "$(sanitize "${COMPOSE_ENV_VAR:-}")")"
+          [[ -n "$BASE_ENV" ]] || BASE_ENV="$RUNTIME_CONFIG_DIR/.env"
+          COMPOSE_OVERRIDE="$(strip_slash "$(sanitize "${COMPOSE_OVERRIDE_VAR:-}")")"
+          OVERRIDE_PINNED=1
+          if [[ -z "$COMPOSE_OVERRIDE" ]]; then
+            OVERRIDE_PINNED=0
+            COMPOSE_OVERRIDE="$RUNTIME_CONFIG_DIR/docker-compose.override.yml"
+          fi
+
+          # ── Absolute paths ──────────────────────────────────────────────────
+          path_variables=(RUNNER_DIR DEPLOY_DIR RUNTIME_CONFIG_DIR BASE_ENV COMPOSE_OVERRIDE)
+          for variable_name in "${path_variables[@]}"; do
+            if [[ "${!variable_name}" != /* ]]; then
+              echo "::error::${variable_name} must contain an absolute path"
+              exit 1
+            fi
+          done
+
+          # ── The deploy must never write into the runner installation ────────
+          for variable_name in DEPLOY_DIR RUNTIME_CONFIG_DIR; do
+            variable_value="${!variable_name}"
+            if [[ "$variable_value" == "$RUNNER_DIR" || "$variable_value" == "$RUNNER_DIR/"* ]]; then
+              echo "::error::${variable_name} overlaps the runner installation (RUNNER_DIR)"
+              exit 1
+            fi
+          done
+
+          # ── Server-managed config must survive `rsync --delete` ─────────────
+          # Anything inside DEPLOY_DIR is a sync destination; the base env file and
+          # the override live there only by mistake, and the mistake destroys them.
+          for variable_name in RUNTIME_CONFIG_DIR BASE_ENV COMPOSE_OVERRIDE; do
+            variable_value="${!variable_name}"
+            if [[ "$variable_value" == "$DEPLOY_DIR" || "$variable_value" == "$DEPLOY_DIR/"* ]]; then
+              echo "::error::${variable_name} must be outside DEPLOY_DIR — the deploy's rsync --delete would destroy it"
+              exit 1
+            fi
+          done
+
+          # ── Permission preflight ────────────────────────────────────────────
+          # Check both halves up front: without this the first symptom is a bare
+          # "Permission denied" from a redirect deep inside a later step.
+          if [[ -e "$DEPLOY_DIR" && ! -w "$DEPLOY_DIR" ]]; then
+            echo "::error::DEPLOY_DIR is not writable by $(id -un) on $(hostname -s)"
+            exit 1
+          fi
+          if [[ ! -e "$BASE_ENV" ]]; then
+            echo "::error::The server-managed base env file (COMPOSE_ENV, default \$RUNTIME_CONFIG_DIR/.env) does not exist on $(hostname -s). It carries this server's ROUTE_*/APP_* blocks — without it every file-provider route disappears. Provision it on the host."
+            exit 1
+          fi
+          if [[ ! -r "$BASE_ENV" ]]; then
+            echo "::error::The server-managed base env file is not readable by $(id -un) on $(hostname -s)"
+            exit 1
+          fi
+
+          # A pinned override that has gone missing is the exact silent failure this
+          # guards: Traefik comes up on `web` only and every labelled backend 504s.
+          if [[ "$OVERRIDE_PINNED" -eq 1 && ! -f "$COMPOSE_OVERRIDE" ]]; then
+            echo "::error::COMPOSE_OVERRIDE is pinned in the 'Prod' environment but the file does not exist on $(hostname -s). It attaches this edge to the app data-plane network(s) — create it, or clear the COMPOSE_OVERRIDE variable to fall back to \$RUNTIME_CONFIG_DIR/docker-compose.override.yml."
+            exit 1
+          fi
+
+          {
+            echo "APP_NAME=$APP_NAME"
+            echo "COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME"
+            echo "RUNNER_DIR=$RUNNER_DIR"
+            echo "DEPLOY_DIR=$DEPLOY_DIR"
+            echo "RUNTIME_CONFIG_DIR=$RUNTIME_CONFIG_DIR"
+            echo "BASE_ENV=$BASE_ENV"
+            echo "MERGED_ENV=$RUNNER_TEMP/$APP_NAME.env"
+          } >> "$GITHUB_ENV"
+
+          if [[ -f "$COMPOSE_OVERRIDE" ]]; then
+            echo "COMPOSE_OVERRIDE=$COMPOSE_OVERRIDE" >> "$GITHUB_ENV"
+            echo "Configuration OK — merging the server-local compose override."
+          else
+            echo "COMPOSE_OVERRIDE=" >> "$GITHUB_ENV"
+            echo "Configuration OK — no compose override present; base compose only."
+          fi
+
+      - name: Synchronize application files
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 0750 "$DEPLOY_DIR"
+          # --delete keeps the deploy dir in sync with the repo. Excluded paths are
+          # ALSO protected from deletion, which is how the server-only state below
+          # survives every deploy.
           rsync -a --delete \
             --exclude='.git/' \
+            --exclude='.github/' \
             --exclude='.env' \
             --exclude='docker-compose.override.yml' \
             --exclude='letsencrypt/' \
             --exclude='traefik/dynamic/*.yml' \
             --exclude='traefik/dynamic/*.yaml' \
             --exclude='nginx/generated/' \
-            ./ "$DEPLOY_DIR/"
+            "$GITHUB_WORKSPACE/" "$DEPLOY_DIR/"
 
-      - name: Resolve compose invocation
-        # Build the flags every later `docker compose` call shares, from the Prod
-        # variables: the env file to read and the server-local override to merge.
-        # Fails loudly if COMPOSE_OVERRIDE is set but missing — the exact silent
-        # failure (Traefik off the data-plane net → tenant 504s) that this guards.
-        working-directory: ${{ env.DEPLOY_DIR }}
-        run: |
-          set -euo pipefail
-          env_path="${COMPOSE_ENV:-$DEPLOY_DIR/.env}"
-          args="-f docker-compose.yml"
-          if [ -n "${COMPOSE_OVERRIDE:-}" ]; then
-            if [ ! -f "$COMPOSE_OVERRIDE" ]; then
-              echo "::error::COMPOSE_OVERRIDE points at '$COMPOSE_OVERRIDE' but that file does not exist on $(hostname -s). It attaches this edge to the app data-plane network — create it (see DEPLOY-<server>.local.md) or clear the COMPOSE_OVERRIDE variable."
-              exit 1
-            fi
-            args="$args -f $COMPOSE_OVERRIDE"
-          fi
-          # --env-file first so ${ACME_EMAIL} interpolation resolves. Persist for later steps.
-          echo "ENV_PATH=$env_path" >> "$GITHUB_ENV"
-          echo "COMPOSE_ARGS=--env-file $env_path $args" >> "$GITHUB_ENV"
-
-      - name: Ensure .env is present (write from secrets, or verify if root-managed)
-        # COMPOSE_ENV may be a root-managed file the runner can only READ (the single
-        # source of secrets on the host, e.g. root:github-runner rw-r-----). If we CAN
-        # write it, (re)generate it from the Prod secrets; if not, treat it as externally
-        # managed and just validate it. Values arrive via env: (NOT interpolated into the
-        # script body) so a secret can't inject shell, and are written with printf %s so a
-        # DASHBOARD_AUTH htpasswd hash containing `$` stays literal.
+      - name: Render the effective Traefik static config
+        # Traefik's static-configuration sources are MUTUALLY EXCLUSIVE: the loader
+        # chain is file → flags → env and stops at the first that resolves, and it
+        # reads exactly ONE file. So neither the per-server entrypoints nor the ACME
+        # email can arrive as a TRAEFIK_* variable, a compose `command:` flag, or a
+        # second config file — both have to be merged into the one file Traefik loads.
+        #
+        # Base (repo, synced) + overlay ($RUNTIME_CONFIG_DIR/traefik.override.yml,
+        # server-managed and read-only to this job) + the ACME email secret, written
+        # to the SYNCED copy — which the rsync overwrites every run, so the result
+        # never drifts.
         env:
           ACME_EMAIL: ${{ secrets.ACME_EMAIL || secrets.TRAEFIK_EMAIL }}
-          DASHBOARD_HOST: ${{ vars.DASHBOARD_HOST }}
-          DASHBOARD_AUTH: ${{ secrets.DASHBOARD_AUTH }}
+        shell: bash
         run: |
           set -euo pipefail
-          if [ -w "$ENV_PATH" ] || { [ ! -e "$ENV_PATH" ] && mkdir -p "$(dirname "$ENV_PATH")" 2>/dev/null && [ -w "$(dirname "$ENV_PATH")" ]; }; then
-            if [ -z "${ACME_EMAIL:-}" ]; then
-              echo "::error::ACME_EMAIL is empty. Set secret ACME_EMAIL (or TRAEFIK_EMAIL) in the 'Prod' environment, or pre-provision $ENV_PATH on the host."
-              exit 1
-            fi
-            umask 077
-            {
-              printf 'ACME_EMAIL=%s\n' "$ACME_EMAIL"
-              if [ -n "${DASHBOARD_HOST:-}" ]; then printf 'DASHBOARD_HOST=%s\n' "$DASHBOARD_HOST"; fi
-              if [ -n "${DASHBOARD_AUTH:-}" ]; then printf 'DASHBOARD_AUTH=%s\n' "$DASHBOARD_AUTH"; fi
-            } > "$ENV_PATH"
-            chmod 600 "$ENV_PATH"
-            echo "Wrote $ENV_PATH from Prod secrets."
+          static_config="$DEPLOY_DIR/traefik/traefik.yml"
+          static_overlay="$RUNTIME_CONFIG_DIR/traefik.override.yml"
+          test -f "$static_config"
+
+          if ! python3 -c 'import yaml' 2>/dev/null; then
+            echo "::error::python3 cannot import yaml on $(hostname -s) — the static-config merge needs it. Install it once: sudo apt-get install -y python3-yaml"
+            exit 1
+          fi
+          if [[ -e "$static_overlay" && ! -r "$static_overlay" ]]; then
+            echo "::error::The per-server Traefik overlay exists but is not readable by $(id -un) on $(hostname -s)"
+            exit 1
+          fi
+          if [[ -n "${ACME_EMAIL:-}" ]]; then
+            case "$ACME_EMAIL" in
+              *[$'\n\r']*) echo "::error::ACME_EMAIL contains a newline"; exit 1 ;;
+            esac
           else
-            # Read-only to the runner → root-managed on the host. Validate, don't touch.
-            [ -s "$ENV_PATH" ] || { echo "::error::$ENV_PATH is missing/empty and not writable by the runner — provision it on the host (must contain ACME_EMAIL=…)."; exit 1; }
-            grep -q '^ACME_EMAIL=' "$ENV_PATH" || echo "::warning::$ENV_PATH has no ACME_EMAIL= line — Traefik ACME may fail."
-            echo "Using externally-managed $ENV_PATH (not writable by runner) — left as-is."
+            echo "::warning::No ACME_EMAIL/TRAEFIK_EMAIL secret set — Let's Encrypt will register the account without an email address, so no expiry notices are sent. Certificates still issue."
           fi
 
-      - name: Render routes + reload edge
-        working-directory: ${{ env.DEPLOY_DIR }}
+          # Values arrive via env (never interpolated into the script body) so a
+          # secret cannot inject Python, and are never echoed.
+          STATIC_CONFIG="$static_config" STATIC_OVERLAY="$static_overlay" python3 - <<'PY'
+          import os, sys, yaml
+
+          # An entrypoint address dumps as the plain scalar `address: :80`, whose
+          # leading colon is an edge case no parser should have to adjudicate — and
+          # a static config Traefik cannot read takes the whole edge down. Quote it.
+          def _represent_str(dumper, data):
+              style = "'" if data.startswith((":", "*", "&", "!", "%", "@", "`")) else None
+              return dumper.represent_scalar("tag:yaml.org,2002:str", data, style=style)
+
+          yaml.add_representer(str, _represent_str, Dumper=yaml.SafeDumper)
+
+          base_path = os.environ["STATIC_CONFIG"]
+          overlay_path = os.environ["STATIC_OVERLAY"]
+          email = os.environ.get("ACME_EMAIL", "")
+
+          with open(base_path, encoding="utf-8") as fh:
+              config = yaml.safe_load(fh) or {}
+
+          def deep_merge(base, overlay, path=""):
+              """Mappings merge key-by-key; everything else is replaced wholesale."""
+              for key, value in overlay.items():
+                  here = f"{path}.{key}" if path else key
+                  if isinstance(value, dict) and isinstance(base.get(key), dict):
+                      deep_merge(base[key], value, here)
+                  else:
+                      if key in base:
+                          print(f"overlay replaces {here}")
+                      else:
+                          print(f"overlay adds {here}")
+                      base[key] = value
+              return base
+
+          if os.path.exists(overlay_path):
+              with open(overlay_path, encoding="utf-8") as fh:
+                  overlay = yaml.safe_load(fh) or {}
+              if not isinstance(overlay, dict):
+                  sys.exit("::error::The per-server Traefik overlay must be a YAML mapping")
+              deep_merge(config, overlay)
+          else:
+              print("No per-server Traefik overlay on this host — using the repo base.")
+
+          if email:
+              try:
+                  config["certificatesResolvers"]["le"]["acme"]["email"] = email
+              except (KeyError, TypeError):
+                  sys.exit("::error::No certificatesResolvers.le.acme block in the "
+                           "merged static config — cannot set the ACME email.")
+
+          with open(base_path, "w", encoding="utf-8") as fh:
+              yaml.safe_dump(config, fh, default_flow_style=False, sort_keys=False)
+
+          print("entrypoints:", ", ".join(config.get("entryPoints", {})))
+          PY
+
+      - name: Assemble the runtime environment
+        # Base (server-managed, verbatim) + GitHub overlay (appended after, so it
+        # wins on duplicate keys) → $RUNNER_TEMP, which the runner wipes with the
+        # job. The server's own env file is never written by CI.
+        env:
+          DASHBOARD_HOST: ${{ vars.DASHBOARD_HOST }}
+          ACME_EMAIL: ${{ secrets.ACME_EMAIL || secrets.TRAEFIK_EMAIL }}
+          DASHBOARD_AUTH: ${{ secrets.DASHBOARD_AUTH }}
+        shell: bash
         run: |
           set -euo pipefail
-          # Ensure every external network the MERGED compose config references exists.
-          # The base declares the shared `web` net; a server-local
-          # docker-compose.override.yml may add app data-plane nets (e.g. app-traffic).
-          # Creating them here (idempotent) makes the deploy self-healing after a
-          # `docker network prune` or a full `docker system prune`, while keeping the
-          # committed base app-agnostic — the network list is discovered, not hardcoded.
+          umask 077
+
+          # 1. Base, copied verbatim. Carries this server's ROUTE_*/APP_* blocks.
+          cp "$BASE_ENV" "$MERGED_ENV"
+          chmod 0600 "$MERGED_ENV"
+
+          # 2. Overlay.
+          append_env() {
+            local key="$1" value="${2-}"
+            # An unset value written as `NAME=` would OVERRIDE the inherited base
+            # value with an empty string — the merge equivalent of deleting it.
+            [[ -n "$value" ]] || return 0
+            # A newline splits the value across two lines and corrupts every line
+            # after it.
+            case "$value" in
+              *[$'\n\r']*)
+                echo "::error::${key} contains a newline — refusing to write it"
+                exit 1
+                ;;
+            esac
+            # Compose interpolates --env-file values, so a lone `$` SILENTLY
+            # TRUNCATES the value at that point (`a$b` arrives as `a`). `$$` is the
+            # documented escape and round-trips to a literal `$`.
+            printf '%s=%s\n' "$key" "${value//\$/\$\$}" >> "$MERGED_ENV"
+          }
+
+          append_env ACME_EMAIL     "${ACME_EMAIL:-}"
+          append_env DASHBOARD_HOST "${DASHBOARD_HOST:-}"
+          append_env DASHBOARD_AUTH "${DASHBOARD_AUTH:-}"
+
+          # 3. Validate the assembled result by FORMAT, not just presence — a
+          #    present-but-empty ACME_EMAIL passes a non-empty check and still leaves
+          #    the ACME account unregistered.
+          if ! grep -qE '^ACME_EMAIL=.+' "$MERGED_ENV"; then
+            echo "::warning::The assembled environment has no non-empty ACME_EMAIL. Certificates still issue, but the ACME account gets no expiry notices."
+          fi
+
+          echo "Assembled runtime environment ($(grep -c '=' "$MERGED_ENV") keys)."
+
+      - name: Resolve the compose invocation
+        shell: bash
+        run: |
+          set -euo pipefail
+          args="--project-name $COMPOSE_PROJECT_NAME"
+          args="$args --project-directory $DEPLOY_DIR"
+          # --env-file supplies compose-file interpolation AND, via
+          # ${COMPOSE_ENV:-.env} in docker-compose.yml, route-generator's env_file.
+          args="$args --env-file $MERGED_ENV"
+          args="$args -f $DEPLOY_DIR/docker-compose.yml"
+          if [[ -n "${COMPOSE_OVERRIDE:-}" ]]; then
+            args="$args -f $COMPOSE_OVERRIDE"
+          fi
+          echo "COMPOSE_ARGS=$args" >> "$GITHUB_ENV"
+          # Point the compose file's env_file at the MERGED result, not the base, so
+          # route-generator sees the GitHub overlay too. The shell environment beats
+          # --env-file for interpolation, so this wins.
+          echo "COMPOSE_ENV=$MERGED_ENV" >> "$GITHUB_ENV"
+
+      - name: Validate Docker access
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker version
+          docker compose version
+
+      - name: Validate the Docker Compose configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$DEPLOY_DIR/docker-compose.yml"
+          test -f "$MERGED_ENV"
+          [[ -z "${COMPOSE_OVERRIDE:-}" ]] || test -f "$COMPOSE_OVERRIDE"
+          docker compose $COMPOSE_ARGS config --quiet
+
+      - name: Render routes and deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Ensure every external network the MERGED config references exists. The
+          # base declares the shared `web` net; a server-local override may add app
+          # data-plane nets. Discovering them (rather than hardcoding a list) keeps
+          # the committed base app-agnostic and makes the deploy self-healing after a
+          # `docker network prune`.
           docker compose $COMPOSE_ARGS config --format json \
             | python3 -c 'import sys, json; [print(n.get("name", k)) for k, n in json.load(sys.stdin).get("networks", {}).items() if n.get("external")]' \
             | while read -r net; do
                 docker network inspect "$net" >/dev/null 2>&1 || docker network create "$net"
               done
+
           docker compose $COMPOSE_ARGS pull --quiet traefik route-generator edge-spa
-          docker compose $COMPOSE_ARGS run --rm route-generator   # re-renders traefik/dynamic/routes.yml + nginx/generated/spa.conf from COMPOSE_ENV
-          docker compose $COMPOSE_ARGS up -d --remove-orphans      # Traefik hot-reloads; only restarts on compose changes
-          # Traefik hot-reloads routes.yml on its own, but edge-spa nginx must be told
-          # to re-read the regenerated spa.conf when the container wasn't recreated
-          # (e.g. a pure .env change). Validate first; skip cleanly if edge-spa isn't up.
+          # Re-renders traefik/dynamic/routes.yml + nginx/generated/spa.conf.
+          docker compose $COMPOSE_ARGS run --rm route-generator
+          # Traefik hot-reloads its dynamic files; compose only restarts what changed.
+          docker compose $COMPOSE_ARGS up -d --remove-orphans
+
+          # edge-spa nginx must be TOLD to re-read the regenerated spa.conf when its
+          # container wasn't recreated (e.g. a pure .env change). Validate first; skip
+          # cleanly if edge-spa isn't running.
           if docker compose $COMPOSE_ARGS ps -q edge-spa | grep -q .; then
             docker compose $COMPOSE_ARGS exec -T edge-spa nginx -t \
               && docker compose $COMPOSE_ARGS exec -T edge-spa nginx -s reload
           fi
 
       - name: Verify the edge joined every network its config declares
-        # The incident this whole workflow rev fixes: Traefik silently came up on `web`
-        # only (override not merged) and every labelled backend on app-traffic 504'd.
-        # Assert the running container is on all networks the MERGED config assigns to it.
-        working-directory: ${{ env.DEPLOY_DIR }}
+        # The incident this guards: Traefik silently came up on `web` only (override
+        # not merged) and every labelled backend on the data-plane network 504'd.
+        shell: bash
         run: |
           set -euo pipefail
           want="$(docker compose $COMPOSE_ARGS config --format json \
@@ -175,12 +439,12 @@ jobs:
             printf '%s\n' "$have" | grep -qx "$n" || missing="$missing $n"
           done
           if [ -n "$missing" ]; then
-            echo "::error::edge-traefik is NOT attached to:$missing — the override did not merge. Every labelled backend on those networks will 504. Check the COMPOSE_OVERRIDE variable and file."
+            echo "::error::edge-traefik is NOT attached to:$missing — the override did not merge. Every labelled backend on those networks will 504."
             exit 1
           fi
           echo "OK: edge-traefik attached to all declared networks ($(printf '%s' "$want" | tr '\n' ' '))"
 
       - name: Show status
         if: always()
-        working-directory: ${{ env.DEPLOY_DIR }}
+        shell: bash
         run: docker compose ${COMPOSE_ARGS:--f docker-compose.yml} ps
