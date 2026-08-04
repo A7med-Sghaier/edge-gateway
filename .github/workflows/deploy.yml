@@ -103,7 +103,6 @@ jobs:
           # ── Required variables ──────────────────────────────────────────────
           required_variables=(
             APP_NAME
-            RUNNER_DIR
             DEPLOY_DIR
             RUNTIME_CONFIG_DIR
             COMPOSE_PROJECT_NAME
@@ -116,6 +115,19 @@ jobs:
             fi
           done
           [[ "$missing" -eq 0 ]] || exit 1
+
+          # RUNNER_DIR guards the deploy from writing into the runner installation,
+          # so it has to describe where the runner ACTUALLY is. The runner tells us:
+          # RUNNER_WORKSPACE is <runner-dir>/_work/<repo>, so its grandparent is the
+          # install root. Discovering it beats a hand-set variable, which protects
+          # nothing once it drifts from the box. A Prod variable still wins if set.
+          if [[ -z "$RUNNER_DIR" ]]; then
+            if [[ -z "${RUNNER_WORKSPACE:-}" ]]; then
+              echo "::error::RUNNER_DIR is unset and RUNNER_WORKSPACE is not available to derive it — set RUNNER_DIR in the 'Prod' environment"
+              exit 1
+            fi
+            RUNNER_DIR="$(cd "$RUNNER_WORKSPACE/../.." && pwd)"
+          fi
 
           # Derive the server-managed paths from RUNTIME_CONFIG_DIR unless the
           # environment pins them explicitly.
