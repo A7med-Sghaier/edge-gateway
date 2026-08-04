@@ -73,6 +73,7 @@ flowchart TD
 | --- | --- | --- |
 | **File** | Apps with **no** Traefik labels | `ROUTE_*` blocks in `.env` → rendered to `traefik/dynamic/routes.yml`, hot-reloaded |
 | **File** | Static frontend SPAs (served by `edge-spa`) | `APP_*` blocks in `.env` → nginx server blocks + web/admin/API routers, hot-reloaded |
+| **File** | Non-HTTP protocols (e.g. MongoDB) | `TCP_*` blocks in `.env` → a `tcp:` router on its own entrypoint, with optional TLS termination and IP allowlist |
 | **Docker** | Apps that **already** ship Traefik labels | Auto-discovered on `web` / `app-traffic`; `traefik.enable=true` opt-in |
 
 ## Tech Stack
@@ -84,7 +85,7 @@ flowchart TD
 | Runtime | Docker Compose, shared external networks (`web`, `app-traffic`) |
 | Static SPA serving | `nginx:1.27-alpine` (`edge-spa`), builds bind-mounted from host `/var/www` |
 | Route generation | POSIX `sh` script on Alpine 3.20, rendering Traefik dynamic config + edge-spa nginx config |
-| Configuration | `.env` file-provider blocks (`ROUTE_*`, `APP_*`) + Docker labels |
+| Configuration | `.env` file-provider blocks (`ROUTE_*`, `APP_*`, `TCP_*`) + Docker labels |
 
 <div align="center"><img src="./assets/divider.svg" width="70%" alt="" /></div>
 
@@ -106,6 +107,22 @@ flowchart TD
   backend with a CORS middleware.
 - Traefik reaches `edge-spa` by container name over `web` (`http://edge-spa:80`); there
   are no host ports. The `edge-spa` nginx is reloaded on deploy when its config changes.
+
+**Raw-TCP backends (`TCP_*`):**
+- For protocols that aren't HTTP — a database reached by a desktop client, say. They
+  send no cleartext SNI, so they can't be multiplexed onto `:443` and each needs its
+  own entrypoint.
+- A `TCP_*` block renders a `tcp:` router + service, optionally with TLS termination
+  (a Let's Encrypt cert on a real hostname, forwarded as plaintext to the backend)
+  and an `ipAllowList` middleware.
+- The **entrypoint itself is per-server static config**, so it is not declared in
+  `.env`: each host adds it to `$RUNTIME_CONFIG_DIR/traefik.override.yml` (copy
+  [`traefik/traefik.override.example.yml`](traefik/traefik.override.example.yml),
+  which the deploy deep-merges over the repo's `traefik/traefik.yml`) and publishes
+  the port from its own `docker-compose.override.yml`.
+- Exposing a database this way is a real decision: without an allowlist it is
+  reachable from the whole internet within hours of the port opening. An SSH tunnel
+  exposes nothing and needs no gateway config — prefer it for occasional access.
 
 **Label-driven apps (Docker provider):**
 - Any container with `traefik.enable=true` on the `web` or `app-traffic` network is
@@ -251,10 +268,11 @@ the Traefik ACME `dnsChallenge` docs. The env-driven routing here stays identica
 ```text
 edge-gateway/
 ├── docker-compose.yml         # route-generator + traefik + edge-spa
-├── .env.example               # copy to .env — ROUTE_*/APP_* routes + ACME email
+├── .env.example               # copy to .env — ROUTE_*/APP_*/TCP_* routes + ACME email
 ├── assets/                    # README banner + divider (SVG)
 ├── traefik/
 │   ├── traefik.yml            # static config (entrypoints, ACME, providers)
+│   ├── traefik.override.example.yml  # per-server static overlay — copy to the server
 │   └── dynamic/               # generated routes.yml (gitignored)
 ├── nginx/
 │   └── generated/             # generated spa.conf for edge-spa (gitignored)
