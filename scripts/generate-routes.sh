@@ -23,6 +23,19 @@
 #   APP_1_ADMIN_ROOT=/var/www/example-app/admin/html    # optional (required if ADMIN_HOSTS set)
 #   APP_1_API=http://host.docker.internal:8080         # optional (adds api + socket.io + CORS)
 #
+# ── TCP_* : raw-TCP backends (non-HTTP protocols, e.g. MongoDB) ───────────────
+# Routed on a DEDICATED entrypoint — a protocol that sends no cleartext SNI can't
+# be multiplexed onto :443. The entrypoint is STATIC config and therefore cannot be
+# declared here: each server adds it to $RUNTIME_CONFIG_DIR/traefik.override.yml
+# (see traefik/traefik.override.example.yml) and publishes the port from its own
+# docker-compose.override.yml.
+#   TCP_1_NAME=mongo                                   # unique router/service id
+#   TCP_1_ENTRYPOINT=mongo                             # entrypoint from the server overlay
+#   TCP_1_SERVICE=host.docker.internal:27017           # host:port — NOT a url
+#   TCP_1_HOSTSNI=mongo.example.com                    # optional, default '*'
+#   TCP_1_TLS=true                                     # optional, default true
+#   TCP_1_ALLOWLIST=203.0.113.7/32,198.51.100.0/24     # optional, comma-separated CIDRs
+#
 # ── Optional Traefik dashboard ────────────────────────────────────────────────
 #   DASHBOARD_HOST=traefik.example.com
 #   DASHBOARD_AUTH=admin:$apr1$....   # htpasswd hash (from `htpasswd -nb admin secret`)
@@ -40,7 +53,13 @@ ROUTERS="$(mktemp)"
 MIDDLEWARES="$(mktemp)"
 SERVICES="$(mktemp)"
 NGINX="$(mktemp)"
-trap 'rm -f "$ROUTERS" "$MIDDLEWARES" "$SERVICES" "$NGINX"' EXIT
+# Same rule for the `tcp:` block: emit it only when it has content, or Traefik
+# rejects the file and drops every route in the provider directory with it.
+TCP_ROUTERS="$(mktemp)"
+TCP_MIDDLEWARES="$(mktemp)"
+TCP_SERVICES="$(mktemp)"
+trap 'rm -f "$ROUTERS" "$MIDDLEWARES" "$SERVICES" "$NGINX" \
+      "$TCP_ROUTERS" "$TCP_MIDDLEWARES" "$TCP_SERVICES"' EXIT
 
 # build_hostrule "a.com, b.com" -> Host(`a.com`) || Host(`b.com`)
 build_hostrule() {
@@ -72,6 +91,18 @@ build_servernames() {
   done
   IFS=$_oldIFS
   printf '%s' "$_out"
+}
+
+# emit_cidrlist "1.2.3.4/32, 5.6.7.0/24" "<indent>"  -> yaml list items on stdout
+emit_cidrlist() {
+  _oldIFS=$IFS
+  IFS=','
+  for _c in $1; do
+    _c=$(printf '%s' "$_c" | tr -d ' ')
+    [ -z "$_c" ] && continue
+    printf '%s- "%s"\n' "$2" "$_c"
+  done
+  IFS=$_oldIFS
 }
 
 # emit_cors <name>  -> appends a permissive CORS middleware to $MIDDLEWARES
@@ -116,6 +147,7 @@ emit_server_block() {
 
 route_count=0
 app_count=0
+tcp_count=0
 
 # ── ROUTE_* (Traefik-only proxies) ────────────────────────────────────────────
 n=1
@@ -227,6 +259,75 @@ while :; do
   n=$((n + 1))
 done
 
+# ── TCP_* (raw-TCP backends on their own entrypoint) ──────────────────────────
+n=1
+while :; do
+  eval "name=\${TCP_${n}_NAME:-}"
+  [ -z "$name" ] && break
+
+  eval "entry=\${TCP_${n}_ENTRYPOINT:-}"
+  eval "service=\${TCP_${n}_SERVICE:-}"
+  eval "hostsni=\${TCP_${n}_HOSTSNI:-*}"
+  eval "tls=\${TCP_${n}_TLS:-true}"
+  eval "allowlist=\${TCP_${n}_ALLOWLIST:-}"
+
+  if [ -z "$entry" ] || [ -z "$service" ]; then
+    echo "ERROR: TCP_${n} ($name) is missing ENTRYPOINT or SERVICE" >&2
+    exit 1
+  fi
+  # A TCP service takes a bare host:port. A url is the ROUTE_*_SERVICE shape and
+  # is the obvious copy-paste mistake; Traefik would accept it and never connect.
+  case "$service" in
+    *://*)
+      echo "ERROR: TCP_${n} ($name) SERVICE must be host:port, not a url ('$service')" >&2
+      exit 1
+      ;;
+  esac
+  # Traefik can only get a certificate for a name it knows, and it refuses a
+  # non-wildcard HostSNI on a router that isn't doing TLS. Both mistakes fail the
+  # whole file at load time, so catch them here where the error names the block.
+  if [ "$tls" = "true" ] && [ "$hostsni" = "*" ]; then
+    echo "ERROR: TCP_${n} ($name) has TLS=true but HOSTSNI='*' — set HOSTSNI to the hostname the cert is for, or TLS=false" >&2
+    exit 1
+  fi
+  if [ "$tls" != "true" ] && [ "$hostsni" != "*" ]; then
+    echo "ERROR: TCP_${n} ($name) sets HOSTSNI='$hostsni' but TLS=false — Traefik rejects a non-wildcard HostSNI on a plaintext TCP router" >&2
+    exit 1
+  fi
+  if [ -z "$allowlist" ]; then
+    echo "WARNING: TCP_${n} ($name) has no ALLOWLIST — this backend is reachable from the entire internet." >&2
+  fi
+
+  {
+    echo "    ${name}:"
+    echo "      rule: \"HostSNI(\`${hostsni}\`)\""
+    echo "      entryPoints: [${entry}]"
+    echo "      service: ${name}"
+    [ -n "$allowlist" ] && echo "      middlewares: [${name}-allowlist]"
+    if [ "$tls" = "true" ]; then
+      echo "      tls:"
+      echo "        certResolver: le"
+    fi
+  } >> "$TCP_ROUTERS"
+  if [ -n "$allowlist" ]; then
+    {
+      echo "    ${name}-allowlist:"
+      echo "      ipAllowList:"
+      echo "        sourceRange:"
+      emit_cidrlist "$allowlist" "          "
+    } >> "$TCP_MIDDLEWARES"
+  fi
+  {
+    echo "    ${name}:"
+    echo "      loadBalancer:"
+    echo "        servers:"
+    echo "          - address: \"${service}\""
+  } >> "$TCP_SERVICES"
+
+  tcp_count=$((tcp_count + 1))
+  n=$((n + 1))
+done
+
 # ── Optional dashboard router (its service is api@internal — no services entry) ─
 DASHBOARD_HOST="${DASHBOARD_HOST:-}"
 DASHBOARD_AUTH="${DASHBOARD_AUTH:-}"
@@ -272,6 +373,21 @@ fi
       cat "$SERVICES"
     fi
   fi
+  if [ -s "$TCP_ROUTERS" ] || [ -s "$TCP_MIDDLEWARES" ] || [ -s "$TCP_SERVICES" ]; then
+    echo "tcp:"
+    if [ -s "$TCP_ROUTERS" ]; then
+      echo "  routers:"
+      cat "$TCP_ROUTERS"
+    fi
+    if [ -s "$TCP_MIDDLEWARES" ]; then
+      echo "  middlewares:"
+      cat "$TCP_MIDDLEWARES"
+    fi
+    if [ -s "$TCP_SERVICES" ]; then
+      echo "  services:"
+      cat "$TCP_SERVICES"
+    fi
+  fi
 } > "$OUT"
 
 # ── Assemble edge-spa nginx config (only when an output path was given) ─────────
@@ -285,4 +401,4 @@ if [ -n "$SPA_OUT" ]; then
   } > "$SPA_OUT"
 fi
 
-echo "Wrote $OUT (${route_count} route(s), ${app_count} app(s)${DASHBOARD_HOST:+ + dashboard})${SPA_OUT:+ + $SPA_OUT}."
+echo "Wrote $OUT (${route_count} route(s), ${app_count} app(s), ${tcp_count} tcp route(s)${DASHBOARD_HOST:+ + dashboard})${SPA_OUT:+ + $SPA_OUT}."
