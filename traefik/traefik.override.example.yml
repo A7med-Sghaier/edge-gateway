@@ -1,0 +1,33 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# PER-SERVER Traefik STATIC configuration overlay — EXAMPLE, not loaded.
+#
+# Copy to the server's runtime config dir as `traefik.override.yml`:
+#     sudo cp traefik/traefik.override.example.yml \
+#             "$RUNTIME_CONFIG_DIR/traefik.override.yml"
+#
+# The deploy deep-merges it over the repo's traefik/traefik.yml into the SYNCED
+# copy (mappings merge key-by-key; scalars and lists are replaced wholesale).
+# Because it lives outside DEPLOY_DIR it survives every `rsync --delete`, and
+# because the merge happens each deploy it never drifts from the repo base.
+#
+# WHY AN OVERLAY AND NOT A SECOND CONFIG FILE: Traefik's static-configuration
+# sources are MUTUALLY EXCLUSIVE (file → flags → env, first one wins), and it
+# reads exactly ONE file. So a per-server entrypoint cannot come from a TRAEFIK_*
+# environment variable, from a compose `command:` flag, or from a second file —
+# it has to be merged into the one file Traefik loads. That is what this does.
+#
+# Keep it MINIMAL: only what genuinely differs between servers. Anything put here
+# stops tracking the repo for this host.
+# ─────────────────────────────────────────────────────────────────────────────
+
+entryPoints:
+  # Raw-TCP entrypoint for MongoDB, so MongoDB Compass can reach it from a laptop.
+  # Mongo's wire protocol sends no cleartext SNI, so it cannot be multiplexed onto
+  # :443 — it needs a port of its own.
+  #
+  # This is INERT until BOTH of these also exist on the server:
+  #   1. `ports: ["27018:27018"]` on the traefik service in the server-local
+  #      docker-compose.override.yml (the committed base never publishes it), and
+  #   2. a TCP_* block in the server .env — see .env.example.
+  mongo:
+    address: ":27018"

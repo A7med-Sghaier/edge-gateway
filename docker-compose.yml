@@ -60,13 +60,19 @@ services:
     depends_on:
       route-generator:
         condition: service_completed_successfully
-    environment:
-      # Static config that carries a secret / per-server value is injected via env
-      # (Traefik reads TRAEFIK_* env vars as static config).
-      - TRAEFIK_CERTIFICATESRESOLVERS_LE_ACME_EMAIL=${ACME_EMAIL}
+    # NOTE: there is deliberately no `environment:` block here. Traefik's static
+    # configuration sources are MUTUALLY EXCLUSIVE (file → flags → env, first one
+    # wins), so while ./traefik/traefik.yml is mounted below, TRAEFIK_* environment
+    # variables are read by nothing. A `TRAEFIK_CERTIFICATESRESOLVERS_LE_ACME_EMAIL`
+    # line used to sit here and had never taken effect. Per-server static values are
+    # patched into the synced traefik.yml by the deploy — see the ACME_EMAIL_LINE
+    # marker in that file.
     ports:
       - "80:80"
       - "443:443"
+      # :27018 (the `mongo` TCP entrypoint) is NOT published here — the committed
+      # base stays app-agnostic. Publish it from the server-local
+      # docker-compose.override.yml on the hosts that need it.
     # NON-dockerized API backends (host processes; the APP_*_API ports rendered
     # into traefik/dynamic/routes.yml) are reached via host.docker.internal. On
     # Linux that name isn't built in — this maps it to the host gateway so the

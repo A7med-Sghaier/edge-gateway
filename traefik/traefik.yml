@@ -18,6 +18,10 @@ entryPoints:
           permanent: true
   websecure:
     address: ":443"
+  # Extra entrypoints (raw-TCP backends such as MongoDB) are PER-SERVER and are
+  # NOT declared here — see traefik.override.example.yml. The deploy deep-merges
+  # $RUNTIME_CONFIG_DIR/traefik.override.yml over this file, so each host adds only
+  # the entrypoints it actually uses.
 
 providers:
   # (1) File provider — routes declared in .env, rendered into this directory.
@@ -40,7 +44,15 @@ providers:
 certificatesResolvers:
   le:
     acme:
-      # email is injected via TRAEFIK_CERTIFICATESRESOLVERS_LE_ACME_EMAIL (see compose/.env)
+      # `email:` is deliberately absent here — the deploy sets it in the SYNCED copy
+      # from the Prod secret, so the address stays out of the repo.
+      #
+      # It cannot be injected as a TRAEFIK_* environment variable. Traefik's static
+      # configuration sources are MUTUALLY EXCLUSIVE — the loader chain is
+      # file → flags → env and stops at the first that resolves — so while this file
+      # is mounted at /etc/traefik/traefik.yml the file loader wins and every
+      # TRAEFIK_* variable is ignored. (Missing email is not fatal: ACME registers
+      # the account anonymously and certs still issue, you just get no expiry notice.)
       storage: /letsencrypt/acme.json
       # TLS-ALPN challenge works out of the box for single hostnames.
       # For wildcard certs, switch to a dnsChallenge block instead (see README).
