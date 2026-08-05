@@ -257,13 +257,27 @@ jobs:
             echo "::error::The per-server Traefik overlay exists but is not readable by $(id -un) on $(hostname -s)"
             exit 1
           fi
-          if [[ -n "${ACME_EMAIL:-}" ]]; then
-            case "$ACME_EMAIL" in
-              *[$'\n\r']*) echo "::error::ACME_EMAIL contains a newline"; exit 1 ;;
-            esac
-          else
+          # Validate the FORMAT, not just presence. An address Let's Encrypt cannot
+          # parse fails ACME account registration outright — "cannot get ACME client"
+          # — which disables the resolver for EVERY host, not just the new one, and
+          # takes renewals down with it. Certificates already in acme.json keep being
+          # served, so the damage is invisible until a renewal is due.
+          #
+          # Degrading to no email is deliberately preferred over failing the deploy:
+          # an anonymous ACME account issues and renews perfectly well, whereas a
+          # hard failure here would leave the previous broken config running.
+          ACME_EMAIL="$(printf '%s' "${ACME_EMAIL:-}" | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          if [[ -z "$ACME_EMAIL" ]]; then
             echo "::warning::No ACME_EMAIL/TRAEFIK_EMAIL secret set — Let's Encrypt will register the account without an email address, so no expiry notices are sent. Certificates still issue."
+          # Held in a variable: an inline ERE is subject to the shell's own quote
+          # handling, which silently turned `\.` into a plain `.` and let an address
+          # with no TLD through.
+          elif acme_email_re='^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$'
+               [[ ! "$ACME_EMAIL" =~ $acme_email_re ]]; then
+            echo "::warning::The ACME_EMAIL/TRAEFIK_EMAIL secret is not a bare email address, so it is being ignored — Let's Encrypt rejects an unparseable contact and that disables certificate issuance and renewal for every host. Re-set it to a plain address with no display name, quotes or spaces: gh secret set TRAEFIK_EMAIL --env Prod --body 'you@example.com'"
+            ACME_EMAIL=""
           fi
+          export ACME_EMAIL
 
           # Values arrive via env (never interpolated into the script body) so a
           # secret cannot inject Python, and are never echoed.
