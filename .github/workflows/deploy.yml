@@ -226,6 +226,7 @@ jobs:
             --exclude='letsencrypt/' \
             --exclude='traefik/dynamic/*.yml' \
             --exclude='traefik/dynamic/*.yaml' \
+            --exclude='traefik/.rendered.sha256' \
             --exclude='nginx/generated/' \
             "$GITHUB_WORKSPACE/" "$DEPLOY_DIR/"
 
@@ -336,6 +337,30 @@ jobs:
           print("entrypoints:", ", ".join(config.get("entryPoints", {})))
           PY
 
+          # Traefik reads static config ONLY at startup and `up -d` does not recreate
+          # a container because a bind-mounted file changed underneath it — so
+          # rendering without this check silently leaves the old config running. That
+          # has already cost two debugging sessions.
+          #
+          # The rendered file cannot be compared against itself between runs (the
+          # rsync overwrites it with the repo base every time), so the previous
+          # result's checksum is kept beside it, excluded from the sync. It is
+          # written only AFTER the restart actually happens, so a deploy that fails
+          # in between still reports the change on the next run.
+          rendered_sum="$(sha256sum "$static_config" | cut -d' ' -f1)"
+          previous_sum=""
+          [[ -f "$DEPLOY_DIR/traefik/.rendered.sha256" ]] &&
+            previous_sum="$(cat "$DEPLOY_DIR/traefik/.rendered.sha256")"
+
+          {
+            echo "RENDERED_STATIC_SUM=$rendered_sum"
+            if [[ "$rendered_sum" == "$previous_sum" ]]; then
+              echo "STATIC_CONFIG_CHANGED=0"
+            else
+              echo "STATIC_CONFIG_CHANGED=1"
+            fi
+          } >> "$GITHUB_ENV"
+
       - name: Assemble the runtime environment
         # Base (server-managed, verbatim) + GitHub overlay (appended after, so it
         # wins on duplicate keys) → $RUNNER_TEMP, which the runner wipes with the
@@ -440,7 +465,26 @@ jobs:
           # Re-renders traefik/dynamic/routes.yml + nginx/generated/spa.conf.
           docker compose $COMPOSE_ARGS run --rm route-generator
           # Traefik hot-reloads its dynamic files; compose only restarts what changed.
+          traefik_before="$(docker compose $COMPOSE_ARGS ps -q traefik || true)"
           docker compose $COMPOSE_ARGS up -d --remove-orphans
+          traefik_after="$(docker compose $COMPOSE_ARGS ps -q traefik)"
+
+          # Restart ONLY when the static config changed and compose did not already
+          # recreate the container — a recreated container has read the new file
+          # anyway, and an unnecessary restart drops every live connection through
+          # the edge.
+          if [[ "${STATIC_CONFIG_CHANGED:-0}" == "1" ]]; then
+            if [[ -n "$traefik_before" && "$traefik_before" == "$traefik_after" ]]; then
+              echo "Static config changed — restarting Traefik to load it."
+              docker compose $COMPOSE_ARGS restart traefik
+            else
+              echo "Static config changed; compose recreated Traefik, which already loaded it."
+            fi
+          else
+            echo "Static config unchanged — no Traefik restart needed."
+          fi
+          # Recorded only now, so a failure above leaves the change pending.
+          printf '%s\n' "$RENDERED_STATIC_SUM" > "$DEPLOY_DIR/traefik/.rendered.sha256"
 
           # edge-spa nginx must be TOLD to re-read the regenerated spa.conf when its
           # container wasn't recreated (e.g. a pure .env change). Validate first; skip
