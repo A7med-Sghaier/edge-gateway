@@ -70,9 +70,9 @@ services:
     ports:
       - "80:80"
       - "443:443"
-      # :27018 (the `mongo` TCP entrypoint) is NOT published here — the committed
-      # base stays app-agnostic. Publish it from the server-local
-      # docker-compose.override.yml on the hosts that need it.
+      # Only the web ports belong here. A TCP_* backend needs its own entrypoint
+      # port, but that is per-server config — publish it from that host's local
+      # docker-compose.override.yml so the committed base stays app-agnostic.
     # NON-dockerized API backends (host processes; the APP_*_API ports rendered
     # into traefik/dynamic/routes.yml) are reached via host.docker.internal. On
     # Linux that name isn't built in — this maps it to the host gateway so the
