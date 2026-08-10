@@ -61,12 +61,12 @@ Edge Gateway demonstrates production-oriented platform and DevOps engineering:
 ```mermaid
 flowchart TD
   Net["Internet · :80 / :443"] --> Edge["edge-gateway (Traefik)<br/>owns 80/443 · auto Let's Encrypt (resolver le)"]
-  Edge -->|docker provider<br/>exposedByDefault=false| Docker["Labelled Docker apps<br/>networks: web, app-traffic"]
+  Edge -->|docker provider<br/>exposedByDefault=false| Docker["Labelled Docker apps<br/>networks: web + app data-plane net"]
   Docker --> Tenants["Multi-tenant app<br/>(its own Traefik labels — unchanged)"]
   Docker --> Other["Any other labelled Docker app (on web)"]
   Edge -->|file provider<br/>routes.yml ← .env| File["Label-less apps<br/>dashboard, external URLs, …"]
   Edge -->|file provider<br/>APP_* ← .env| Spa["edge-spa (nginx)<br/>static SPA builds from /var/www"]
-  Spa -.->|/api · /socket.io| Api["Host API processes<br/>(host.docker.internal)"]
+  Spa -.->|APP_N_API_PATHS| Api["API backends<br/>(container or host process)"]
 ```
 
 | Provider | Used for | How routing is declared |
@@ -74,7 +74,7 @@ flowchart TD
 | **File** | Apps with **no** Traefik labels | `ROUTE_*` blocks in `.env` → rendered to `traefik/dynamic/routes.yml`, hot-reloaded |
 | **File** | Static frontend SPAs (served by `edge-spa`) | `APP_*` blocks in `.env` → nginx server blocks + web/admin/API routers, hot-reloaded |
 | **File** | Non-HTTP protocols (e.g. MongoDB) | `TCP_*` blocks in `.env` → a `tcp:` router on its own entrypoint, with optional TLS termination and IP allowlist |
-| **Docker** | Apps that **already** ship Traefik labels | Auto-discovered on `web` / `app-traffic`; `traefik.enable=true` opt-in |
+| **Docker** | Apps that **already** ship Traefik labels | Auto-discovered on `web` or the app's own data-plane network; `traefik.enable=true` opt-in |
 
 ## Tech Stack
 
@@ -82,7 +82,7 @@ flowchart TD
 | --- | --- |
 | Reverse proxy | Traefik v3.7 (file + Docker providers, TLS entrypoints) |
 | TLS | Let's Encrypt / ACME, TLS-ALPN challenge, optional DNS-01 wildcard |
-| Runtime | Docker Compose, shared external networks (`web`, `app-traffic`) |
+| Runtime | Docker Compose, shared external networks (`web` + any app data-plane network) |
 | Static SPA serving | `nginx:1.27-alpine` (`edge-spa`), builds bind-mounted from host `/var/www` |
 | Route generation | POSIX `sh` script on Alpine 3.20, rendering Traefik dynamic config + edge-spa nginx config |
 | Configuration | `.env` file-provider blocks (`ROUTE_*`, `APP_*`, `TCP_*`) + Docker labels |
@@ -103,8 +103,12 @@ flowchart TD
 - Each `APP_*` block renders (1) an nginx `server{}` per web/admin host into
   `nginx/generated/spa.conf` (served by the `edge-spa` container from the host's
   bind-mounted `/var/www`) and (2) Traefik routers: a web/admin router → `edge-spa`,
-  plus — when `APP_N_API` is set — an `/api` + `/socket.io` router → that API
-  backend with a CORS middleware.
+  plus — when `APP_N_API` is set — a higher-priority router for the API path prefixes
+  → that API backend with a CORS middleware.
+- The API prefixes default to `/api,/socket.io` and are set per app with
+  `APP_N_API_PATHS`. Everything not matching them falls through to the SPA, so a
+  prefix that is wrong (or missing its leading `/`) shows up as the API returning
+  `index.html` — the generator rejects that shape rather than emitting it.
 - Traefik reaches `edge-spa` by container name over `web` (`http://edge-spa:80`); there
   are no host ports. The `edge-spa` nginx is reloaded on deploy when its config changes.
 
@@ -125,19 +129,33 @@ flowchart TD
   exposes nothing and needs no gateway config — prefer it for occasional access.
 
 **Label-driven apps (Docker provider):**
-- Any container with `traefik.enable=true` on the `web` or `app-traffic` network is
-  discovered automatically — its own labels define routing, TLS, and middlewares.
+- Any container with `traefik.enable=true` on `web` — or on an app data-plane network
+  this edge is attached to — is discovered automatically; its own labels define routing,
+  TLS, and middlewares.
 - `exposedByDefault: false` means containers without that label are ignored.
 
 ## How a labelled multi-tenant app plugs in (zero label changes)
 
 Some apps already deploy each tenant as its own compose project whose containers attach
-to a shared external network (here called **`app-traffic`**) and carry per-tenant Traefik
-labels — routers, security headers, rate limits, IP allowlists. As long as those labels
-reference the same names this edge uses — the cert resolver `le` and the entrypoints
-`web` / `websecure` — this edge discovers and routes every tenant automatically once it is
-attached to that network (it is, see `docker-compose.yml`). **Nothing in the app's labels
-changes.**
+to a shared external network — the app's **data-plane network**, named whatever that app
+calls it — and carry per-tenant Traefik labels: routers, security headers, rate limits,
+IP allowlists. As long as those labels reference the same names this edge uses — the cert
+resolver `le` and the entrypoints `web` / `websecure` — this edge discovers and routes
+every tenant automatically once it is attached to that network. **Nothing in the app's
+labels changes.**
+
+That network name is deliberately **not** committed here: the base `docker-compose.yml`
+declares only `web`, and each server attaches the edge to its own data-plane network(s)
+from a local, gitignored `docker-compose.override.yml`:
+
+```yaml
+services:
+  traefik:
+    networks: [web, my-app-traffic]
+networks:
+  my-app-traffic:
+    external: true
+```
 
 The only app-side change is that its deploy must stop starting *its own* Traefik, since
 this edge now owns `:80` / `:443`. Gate that with a flag in the app's deploy (e.g.
@@ -147,12 +165,12 @@ services (database, healthchecks, and so on). See "Cutover" below.
 ## Quick start (per server)
 
 ```bash
-# 1. Shared networks. `web` is a generic network label-less/labelled apps join.
-#    `app-traffic` is an example second data-plane network for a labelled
-#    multi-tenant app — rename it to whatever your app uses. Creating them here
-#    first is harmless and lets this edge start independently, e.g. after a reboot.
+# 1. Shared networks. `web` is the generic network label-less/labelled apps join.
+#    Creating it here first is harmless and lets this edge start independently,
+#    e.g. after a reboot.
 docker network create web
-docker network create app-traffic   # skip if your app already created it
+# Plus your app's own data-plane network, if it has one and hasn't created it yet:
+# docker network create my-app-traffic
 
 # 2. Configure
 cp .env.example .env
@@ -162,12 +180,15 @@ $EDITOR .env          # set ACME_EMAIL and any ROUTE_* blocks for label-less app
 docker compose up -d
 ```
 
-That's it. Traefik requests a certificate per hostname automatically, and discovers all
-labelled containers on `web` / `app-traffic`.
+That's it. Traefik requests a certificate per hostname automatically, and discovers every
+labelled container on each network it is attached to.
 
 ## Add / change a route
 
-1. Edit the `ROUTE_*` (proxied apps) or `APP_*` (static SPAs) blocks in `.env`.
+1. Edit the `ROUTE_*` (proxied apps), `APP_*` (static SPAs), or `TCP_*` (raw-TCP
+   backends) blocks in `.env`. A `TCP_*` route also needs its entrypoint in that
+   server's `traefik.override.yml` and its port published from that server's
+   `docker-compose.override.yml` — see "Raw-TCP backends" above.
 2. Regenerate the dynamic config (Traefik picks it up live):
 
 ```bash
@@ -202,8 +223,9 @@ Traefik forwards the original `Host` header, so a multi-tenant app resolves the 
 exactly as it did behind nginx.
 
 For an app that already **has** Traefik labels, you don't touch `.env` at all — just make
-sure its containers are on a network this edge is attached to (`web` or `app-traffic`) and
-it's discovered automatically.
+sure its containers are on a network this edge is attached to (`web`, or its own
+data-plane network added via the local compose override) and it's discovered
+automatically.
 
 ## Optional: Traefik dashboard
 
@@ -269,7 +291,13 @@ the Traefik ACME `dnsChallenge` docs. The env-driven routing here stays identica
 edge-gateway/
 ├── docker-compose.yml         # route-generator + traefik + edge-spa
 ├── .env.example               # copy to .env — ROUTE_*/APP_*/TCP_* routes + ACME email
+├── CLAUDE.md                  # repository guidance / invariants
+├── LICENSE                    # MIT
 ├── assets/                    # README banner + divider (SVG)
+├── docs/
+│   └── continuous-deployment.md   # self-hosted runner deploy model
+├── .github/workflows/
+│   └── deploy.yml             # matrix deploy, one job per edge server
 ├── traefik/
 │   ├── traefik.yml            # static config (entrypoints, ACME, providers)
 │   ├── traefik.override.example.yml  # per-server static overlay — copy to the server
@@ -277,8 +305,13 @@ edge-gateway/
 ├── nginx/
 │   └── generated/             # generated spa.conf for edge-spa (gitignored)
 └── scripts/
-    └── generate-routes.sh     # .env  →  Traefik dynamic config + edge-spa nginx config
+    ├── generate-routes.sh     # .env  →  Traefik dynamic config + edge-spa nginx config
+    └── install-runner.sh      # one-time self-hosted runner setup
 ```
+
+Per-server state — `.env`, `docker-compose.override.yml`, `traefik.override.yml`,
+`letsencrypt/` — is never committed. See
+[docs/continuous-deployment.md](docs/continuous-deployment.md).
 
 ## License
 
