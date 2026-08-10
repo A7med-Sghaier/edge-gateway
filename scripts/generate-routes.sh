@@ -14,14 +14,15 @@
 # ── APP_* : static SPAs served by the dockerized edge-spa nginx ───────────────
 # Each block renders (a) nginx server block(s) rooted at the on-host build dir
 # (bind-mounted /var/www) and (b) Traefik routers: a web/admin router → edge-spa,
-# and — when APP_N_API is set — an /api + /socket.io router → that API
+# and — when APP_N_API is set — a router for the API path prefixes → that API
 # backend, with the CORS middleware Traefik answers preflights from.
-#   APP_1_NAME=example-app                              # unique id
-#   APP_1_WEB_HOSTS=example-app.example.com,www.example-app.example.com
-#   APP_1_WEB_ROOT=/var/www/example-app/web/html        # served build dir
-#   APP_1_ADMIN_HOSTS=admin.example-app.example.com     # optional
-#   APP_1_ADMIN_ROOT=/var/www/example-app/admin/html    # optional (required if ADMIN_HOSTS set)
-#   APP_1_API=http://host.docker.internal:8080         # optional (adds api + socket.io + CORS)
+#   APP_1_NAME=example-app                             # unique id
+#   APP_1_WEB_HOSTS=example.com,www.example.com
+#   APP_1_WEB_ROOT=/var/www/example-app/web/html       # served build dir
+#   APP_1_ADMIN_HOSTS=admin.example.com                # optional
+#   APP_1_ADMIN_ROOT=/var/www/example-app/admin/html   # optional (required if ADMIN_HOSTS set)
+#   APP_1_API=http://api-backend:8080                  # optional (adds api router + CORS)
+#   APP_1_API_PATHS=/api,/socket.io                    # optional, this is the default
 #
 # ── TCP_* : raw-TCP backends (non-HTTP protocols, e.g. MongoDB) ───────────────
 # Routed on a DEDICATED entrypoint — a protocol that sends no cleartext SNI can't
@@ -73,6 +74,34 @@ build_hostrule() {
       _rule="Host(\`$_h\`)"
     else
       _rule="$_rule || Host(\`$_h\`)"
+    fi
+  done
+  IFS=$_oldIFS
+  printf '%s' "$_rule"
+}
+
+# build_pathrule "/api, /socket.io" -> PathPrefix(`/api`) || PathPrefix(`/socket.io`)
+build_pathrule() {
+  _rule=""
+  _oldIFS=$IFS
+  IFS=','
+  for _p in $1; do
+    _p=$(printf '%s' "$_p" | tr -d ' ')
+    [ -z "$_p" ] && continue
+    # A prefix without a leading slash matches nothing, and Traefik accepts the
+    # rule happily — the only symptom is the SPA catch-all answering every API
+    # request with index.html.
+    case "$_p" in
+      /*) ;;
+      *)
+        echo "ERROR: API path prefix '$_p' must start with '/'" >&2
+        exit 1
+        ;;
+    esac
+    if [ -z "$_rule" ]; then
+      _rule="PathPrefix(\`$_p\`)"
+    else
+      _rule="$_rule || PathPrefix(\`$_p\`)"
     fi
   done
   IFS=$_oldIFS
@@ -198,6 +227,7 @@ while :; do
   eval "admin_hosts=\${APP_${n}_ADMIN_HOSTS:-}"
   eval "admin_root=\${APP_${n}_ADMIN_ROOT:-}"
   eval "api=\${APP_${n}_API:-}"
+  eval "api_paths=\${APP_${n}_API_PATHS:-/api,/socket.io}"
 
   if [ -z "$web_hosts" ] || [ -z "$web_root" ]; then
     echo "ERROR: APP_${n} ($name) is missing WEB_HOSTS or WEB_ROOT" >&2
@@ -230,11 +260,17 @@ while :; do
     echo "          - url: \"http://edge-spa:80\""
   } >> "$SERVICES"
 
-  # Traefik: optional API + socket.io router (priority beats the web catch-all).
+  # Traefik: optional API router on the APP_N_API_PATHS prefixes (its priority
+  # beats the web catch-all, which would otherwise answer with index.html).
   if [ -n "$api" ]; then
+    path_rule="$(build_pathrule "$api_paths")"
+    if [ -z "$path_rule" ]; then
+      echo "ERROR: APP_${n} ($name) sets API but API_PATHS has no usable prefix" >&2
+      exit 1
+    fi
     {
       echo "    ${name}-api:"
-      echo "      rule: \"(${all_rule}) && (PathPrefix(\`/api\`) || PathPrefix(\`/socket.io\`))\""
+      echo "      rule: \"(${all_rule}) && (${path_rule})\""
       echo "      entryPoints: [websecure]"
       echo "      service: ${name}-api"
       echo "      priority: 100"
