@@ -1,5 +1,8 @@
-# Secrets & per-server config
-.env
+# Secrets & per-server config. The pattern is `.env*`, NOT `.env.*` — the
+# dot-anchored form misses editor/Finder duplicates like `.env copy`, which
+# carry exactly the same secrets.
+.env*
+!.env.example
 
 # Local compose overlays (app-specific data-plane network, alt ports, etc.)
 # Covers docker-compose.override.yml AND named examples like
@@ -17,8 +20,10 @@ traefik/dynamic/*.yaml
 # server-local, mounted into the edge-spa container. Never committed.
 nginx/generated/
 
-# Private, app-specific deployment runbooks (kept out of the public repo)
+# Private, host-specific deployment runbooks (kept out of the public repo)
 *.local.md
-DEPLOY-*.local.md
+
+# Local tool state — records real paths on this machine
+.claude/settings.local.json
 
 .idea/
