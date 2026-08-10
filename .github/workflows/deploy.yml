@@ -38,17 +38,19 @@ jobs:
 
     strategy:
       # Deploy to every edge server in parallel; one failing server does not
-      # abort the others.
+      # abort the others. The server list is a REPOSITORY variable holding a JSON
+      # array of runner labels, e.g. ["edge-a","edge-b"] — so no server name is
+      # committed to this repo.
       fail-fast: false
       matrix:
-        server: [edge-a, edge-b]
+        server: ${{ fromJSON(vars.EDGE_SERVERS) }}
 
-    # NOTE: GitHub resolves `runs-on` BEFORE applying the job's `environment:`, so an
-    # environment-scoped variable here (vars.SERVER_LABEL) would expand to an empty
-    # string, `runs-on` would be unschedulable, and the job would never be created —
-    # the run fails with no job listed and no annotation. These matrix values are
-    # literals, which is why this works. Do not replace them with an environment
-    # variable; a repository-scoped variable would be required.
+    # NOTE: EDGE_SERVERS must be a REPOSITORY variable, never an environment one.
+    # GitHub resolves `strategy` and `runs-on` BEFORE applying the job's
+    # `environment:`, so an environment-scoped value expands to an empty string,
+    # the matrix collapses to nothing, and the job is never created — the run
+    # reports no jobs, with no error annotation to explain it. The same applies to
+    # any attempt to move these labels into `vars` under the Prod environment.
     runs-on: [self-hosted, edge-gateway, "${{ matrix.server }}"]
 
     # Never run two deploys of the same edge server at once, but let different
