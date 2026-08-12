@@ -61,13 +61,16 @@ Set in **Settings → Environments → Prod → Variables**:
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `APP_NAME` | yes | names the merged env file inside `$RUNNER_TEMP` |
-| `DEPLOY_DIR` | yes | rsync destination (absolute) |
-| `RUNTIME_CONFIG_DIR` | yes | server-managed config dir (absolute, outside `DEPLOY_DIR`) |
 | `COMPOSE_PROJECT_NAME` | yes | compose project name for this edge |
-| `RUNNER_DIR` | no | overrides the value discovered from `RUNNER_WORKSPACE` |
-| `COMPOSE_ENV` | no | pins the base env file; defaults to `$RUNTIME_CONFIG_DIR/.env` |
-| `COMPOSE_OVERRIDE` | no | pins the compose override; defaults to `$RUNTIME_CONFIG_DIR/docker-compose.override.yml` |
 | `DASHBOARD_HOST` | no | hostname for the Traefik dashboard; empty disables it |
+
+**Every path is a `Prod` *secret*, not a variable** — see the table below. That is a
+logging decision, not a confidentiality one: the runner prints a step's resolved
+environment in its "Run" group header, including for the *first* step, before any
+masking that step performs can take effect. A variable is therefore published
+verbatim at least once per job however early the masking runs; a secret is masked
+by the runner from job start. Non-path values stay variables because
+`edge-gateway` identifies nothing.
 
 Pinning `COMPOSE_OVERRIDE` makes it **mandatory** — if the file is then missing, the
 deploy fails instead of silently bringing Traefik up on `web` only, which 504s every
@@ -76,10 +79,15 @@ tolerated and the base compose is used alone.
 
 ### `Prod` environment secrets
 
-| Secret | Purpose |
-| --- | --- |
-| `ACME_EMAIL` (or `TRAEFIK_EMAIL`) | Let's Encrypt contact for expiry notices |
-| `DASHBOARD_AUTH` | htpasswd hash for dashboard basic auth |
+| Secret | Required | Purpose |
+| --- | --- | --- |
+| `DEPLOY_DIR` | yes | rsync destination (absolute) |
+| `RUNTIME_CONFIG_DIR` | yes | server-managed config dir (absolute, outside `DEPLOY_DIR`) |
+| `RUNNER_DIR` | no | overrides the value discovered from `RUNNER_WORKSPACE` |
+| `COMPOSE_ENV` | no | pins the base env file; defaults to `$RUNTIME_CONFIG_DIR/.env` |
+| `COMPOSE_OVERRIDE` | no | pins the compose override; defaults to `$RUNTIME_CONFIG_DIR/docker-compose.override.yml` |
+| `ACME_EMAIL` (or `TRAEFIK_EMAIL`) | yes | Let's Encrypt contact for expiry notices |
+| `DASHBOARD_AUTH` | no | htpasswd hash for dashboard basic auth |
 
 The ACME address is **format-validated**, not merely checked for presence: Let's Encrypt
 rejects a contact it cannot parse, which fails account registration and disables issuance
