@@ -34,7 +34,10 @@ changes**. It also bundles a small **`edge-spa` nginx** that serves non-dockeriz
 frontend builds from the host's `/var/www`, so static SPAs need no per-app web server —
 their routes, admin variants, and API/socket.io proxying are declared in the same `.env`.
 
-This repository is currently private while it is prepared as a portfolio case study.
+Extracted from a live multi-server deployment and published as a portfolio case study.
+Every hostname, server label, and filesystem path in this repository is a placeholder:
+real values are supplied per server through environment variables and GitHub Secrets, so
+the repo carries the **mechanism** and never a deployment's specifics.
 
 > [!NOTE]
 > Only one process on a host can bind `:80`/`:443`. Edge Gateway is deliberately that
