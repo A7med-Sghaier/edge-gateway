@@ -294,7 +294,6 @@ the Traefik ACME `dnsChallenge` docs. The env-driven routing here stays identica
 edge-gateway/
 ├── docker-compose.yml         # route-generator + traefik + edge-spa
 ├── .env.example               # copy to .env — ROUTE_*/APP_*/TCP_* routes + ACME email
-├── CLAUDE.md                  # repository guidance / invariants
 ├── LICENSE                    # MIT
 ├── assets/                    # README banner + divider (SVG)
 ├── docs/
