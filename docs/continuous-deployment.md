@@ -164,10 +164,10 @@ aborting the others.
 ## Installing a runner on a new server
 
 ```bash
-git clone https://github.com/<owner>/edge-gateway.git
+git clone https://github.com/A7med-Sghaier/edge-gateway.git
 cd edge-gateway
 RUNNER_DIR=<runner install dir> DEPLOY_DIR=<deploy dir> \
-  ./scripts/install-runner.sh https://github.com/<owner>/edge-gateway <registration-token>
+  ./scripts/install-runner.sh https://github.com/A7med-Sghaier/edge-gateway <registration-token>
 ```
 
 Get `<registration-token>` from **Settings → Actions → Runners → New self-hosted runner**
