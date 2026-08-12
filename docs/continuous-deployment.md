@@ -139,6 +139,33 @@ recreate the container, since an unnecessary restart drops every live connection
 the edge. The checksum is recorded only *after* the restart succeeds, so a failed deploy
 leaves the change pending for the next run.
 
+## Keeping a public repository's logs clean
+
+On a public repository the **Actions logs and job names are public too**, and there
+is no setting to hide them. A self-hosted deploy prints its own working paths
+constantly, so without deliberate effort the run publishes exactly what the
+repository is careful never to contain. Two mechanisms are needed, because neither
+covers the other's blind spot:
+
+| Leak | Where it appears | Mechanism |
+| --- | --- | --- |
+| `RUNNER_DIR`, `DEPLOY_DIR`, `RUNTIME_CONFIG_DIR`, the env/override paths | checkout, rsync, compose output, error messages | `::add-mask::` in the first step — renders them `***` for the rest of the job |
+| The machine hostname | error messages | masked; messages identify the server by its opaque runner label instead |
+| App data-plane network names | compose output, the network guard | masked at the moment they are discovered from the merged config |
+| **Requested labels, runner name, machine name** | the runner-generated **"Set up job"** block | **not maskable** — emitted before any step runs |
+
+That last row is why **runner labels must be opaque**. `add-mask` only affects
+output produced after it is registered, and "Set up job" precedes every step, so a
+label like `acme-corp-server` is published on every single run no matter what the
+workflow does. Name them `edge-a` / `edge-b`, keep `EDGE_SERVERS` in step with
+them, and register the runners themselves under the same opaque names — the runner
+*name* is printed there too, and unlike labels it can only be changed by
+re-registering.
+
+The masking helper refuses to mask a value shorter than six characters. Masking
+something like `web` would also redact `websecure` everywhere and make a failure
+unreadable, which is its own kind of outage.
+
 ## Deploying
 
 Push to `main` touching `docker-compose.yml`, `traefik/**`, `scripts/**`, or the workflow
