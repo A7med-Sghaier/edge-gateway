@@ -76,18 +76,26 @@ jobs:
       # every operator-facing message: it identifies the failing server just as
       # well, without publishing the machine's real name to a public Actions log.
       SERVER_LABEL: ${{ matrix.server }}
-      # Mapped with NO fallback values — a missing variable must fail the job loudly
+      # Mapped with NO fallback values — a missing value must fail the job loudly
       # rather than silently resolve to a guessed path.
+      #
+      # Every PATH is a SECRET, not a variable, and that is a logging decision
+      # rather than a confidentiality one. The runner prints a step's resolved
+      # environment in its "Run" group header, and it does so for the FIRST step
+      # too — before any `::add-mask::` from that step can take effect. A variable
+      # is therefore published verbatim at least once per job no matter how early
+      # the masking runs, whereas a secret is masked by the runner from job start.
+      # Non-path values stay variables: `edge-gateway` identifies nothing.
       APP_NAME: ${{ vars.APP_NAME }}
-      RUNNER_DIR: ${{ vars.RUNNER_DIR }}
-      DEPLOY_DIR: ${{ vars.DEPLOY_DIR }}
-      RUNTIME_CONFIG_DIR: ${{ vars.RUNTIME_CONFIG_DIR }}
       COMPOSE_PROJECT_NAME: ${{ vars.COMPOSE_PROJECT_NAME }}
+      RUNNER_DIR: ${{ secrets.RUNNER_DIR }}
+      DEPLOY_DIR: ${{ secrets.DEPLOY_DIR }}
+      RUNTIME_CONFIG_DIR: ${{ secrets.RUNTIME_CONFIG_DIR }}
       # Optional overrides. When unset, both derive from RUNTIME_CONFIG_DIR in
-      # "Resolve and validate deployment configuration" — derived from a variable,
-      # never from a hardcoded prefix.
-      COMPOSE_ENV_VAR: ${{ vars.COMPOSE_ENV }}
-      COMPOSE_OVERRIDE_VAR: ${{ vars.COMPOSE_OVERRIDE }}
+      # "Resolve and validate deployment configuration" — derived from a configured
+      # value, never from a hardcoded prefix.
+      COMPOSE_ENV_VAR: ${{ secrets.COMPOSE_ENV }}
+      COMPOSE_OVERRIDE_VAR: ${{ secrets.COMPOSE_OVERRIDE }}
 
     steps:
       # MUST be the first step. This repository is PUBLIC, so its Actions logs and
@@ -104,14 +112,13 @@ jobs:
       # emitted before any step and prints the requested labels, the runner name
       # and the machine name. Those are only made safe by keeping them opaque at
       # the source — hence labels like `edge-a` rather than a real server name.
+      # No step-level `env:` here on purpose. The group header prints a step's
+      # resolved environment, so re-declaring the paths under new names would
+      # publish them a second time — and this is the one step whose header is
+      # printed before its own masks exist. The job-level values are secrets, so
+      # the runner has already masked them by the time this header is written.
       - name: Mask server-specific values
         shell: bash
-        env:
-          RUNNER_DIR_VAR: ${{ vars.RUNNER_DIR }}
-          DEPLOY_DIR_VAR: ${{ vars.DEPLOY_DIR }}
-          RUNTIME_CONFIG_DIR_VAR: ${{ vars.RUNTIME_CONFIG_DIR }}
-          COMPOSE_ENV_VAR: ${{ vars.COMPOSE_ENV }}
-          COMPOSE_OVERRIDE_VAR: ${{ vars.COMPOSE_OVERRIDE }}
         run: |
           set -euo pipefail
           mask() {
@@ -131,9 +138,11 @@ jobs:
           if [[ -n "${RUNNER_WORKSPACE:-}" ]]; then
             mask "$(cd "$RUNNER_WORKSPACE/../.." && pwd)"
           fi
-          mask "${RUNNER_DIR_VAR:-}"
-          mask "${DEPLOY_DIR_VAR:-}"
-          mask "${RUNTIME_CONFIG_DIR_VAR:-}"
+          # Already masked by the runner as secrets; re-masked here so the
+          # normalised form (trailing slash stripped) is covered too.
+          mask "${RUNNER_DIR:-}"
+          mask "${DEPLOY_DIR:-}"
+          mask "${RUNTIME_CONFIG_DIR:-}"
           mask "${COMPOSE_ENV_VAR:-}"
           mask "${COMPOSE_OVERRIDE_VAR:-}"
           mask "$SERVER_LABEL"
