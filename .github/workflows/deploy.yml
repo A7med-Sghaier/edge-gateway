@@ -20,6 +20,18 @@ name: Deploy edge-gateway
 # DEPLOY_DIR also holds server-only state — letsencrypt/ certs, hand-authored
 # traefik/dynamic/*.yml, and the generated nginx/generated/ SPA config — which the
 # rsync excludes protect from --delete.
+#
+# PUBLIC LOGS. This repository is public, so its Actions logs and job names are
+# readable by anyone — a self-hosted deploy would otherwise publish the very paths
+# and server names the repository itself never contains. Two mechanisms keep them
+# out, and BOTH are required:
+#   1. "Mask server-specific values" runs first and `::add-mask::`es every path and
+#      hostname, so they render as *** for the rest of the job.
+#   2. Runner labels are opaque (`edge-a`, not a real server name), because the
+#      runner-generated "Set up job" block prints the requested labels and the
+#      runner name BEFORE any step runs, where masking cannot reach.
+# Anything added here that echoes a server-derived value must be masked at the
+# point it is discovered — see the external-network loop for the pattern.
 
 on:
   push:
@@ -60,6 +72,10 @@ jobs:
       cancel-in-progress: false
 
     env:
+      # The opaque runner label for this job. Used in place of `hostname -s` in
+      # every operator-facing message: it identifies the failing server just as
+      # well, without publishing the machine's real name to a public Actions log.
+      SERVER_LABEL: ${{ matrix.server }}
       # Mapped with NO fallback values — a missing variable must fail the job loudly
       # rather than silently resolve to a guessed path.
       APP_NAME: ${{ vars.APP_NAME }}
@@ -74,6 +90,57 @@ jobs:
       COMPOSE_OVERRIDE_VAR: ${{ vars.COMPOSE_OVERRIDE }}
 
     steps:
+      # MUST be the first step. This repository is PUBLIC, so its Actions logs and
+      # job names are public too — and a self-hosted deploy otherwise prints the
+      # exact server paths this repo is careful never to name. `::add-mask::`
+      # rewrites a value to `***` everywhere it appears for the REST of the job,
+      # including inside compose output, rsync errors and `::error::` messages.
+      #
+      # It only affects output produced AFTER it is registered, which is why this
+      # runs ahead of `actions/checkout` — checkout prints the workspace path, and
+      # the workspace sits underneath the runner install root.
+      #
+      # What this CANNOT hide: the runner-generated "Set up job" block, which is
+      # emitted before any step and prints the requested labels, the runner name
+      # and the machine name. Those are only made safe by keeping them opaque at
+      # the source — hence labels like `edge-a` rather than a real server name.
+      - name: Mask server-specific values
+        shell: bash
+        env:
+          RUNNER_DIR_VAR: ${{ vars.RUNNER_DIR }}
+          DEPLOY_DIR_VAR: ${{ vars.DEPLOY_DIR }}
+          RUNTIME_CONFIG_DIR_VAR: ${{ vars.RUNTIME_CONFIG_DIR }}
+          COMPOSE_ENV_VAR: ${{ vars.COMPOSE_ENV }}
+          COMPOSE_OVERRIDE_VAR: ${{ vars.COMPOSE_OVERRIDE }}
+        run: |
+          set -euo pipefail
+          mask() {
+            local value="${1:-}"
+            value="$(printf '%s' "$value" | tr -d '\r\n')"
+            value="${value%/}"
+            # Refuse to mask something short: `/` or `_work` would redact most of
+            # the log and make every failure unreadable, which is its own outage.
+            [[ "${#value}" -ge 6 ]] || return 0
+            echo "::add-mask::$value"
+          }
+
+          # The runner install root is deliberately NOT a variable — it is derived
+          # from RUNNER_WORKSPACE (<runner-dir>/_work/<repo>). It is also the single
+          # most frequent leak, because GITHUB_WORKSPACE and RUNNER_TEMP both sit
+          # underneath it and masking is applied to substrings.
+          if [[ -n "${RUNNER_WORKSPACE:-}" ]]; then
+            mask "$(cd "$RUNNER_WORKSPACE/../.." && pwd)"
+          fi
+          mask "${RUNNER_DIR_VAR:-}"
+          mask "${DEPLOY_DIR_VAR:-}"
+          mask "${RUNTIME_CONFIG_DIR_VAR:-}"
+          mask "${COMPOSE_ENV_VAR:-}"
+          mask "${COMPOSE_OVERRIDE_VAR:-}"
+          mask "$SERVER_LABEL"
+          mask "$(hostname -f 2>/dev/null || true)"
+
+          echo "Server-specific paths and hostnames are masked for the rest of this job."
+
       - name: Checkout
         uses: actions/checkout@v5
 
@@ -175,22 +242,22 @@ jobs:
           # Check both halves up front: without this the first symptom is a bare
           # "Permission denied" from a redirect deep inside a later step.
           if [[ -e "$DEPLOY_DIR" && ! -w "$DEPLOY_DIR" ]]; then
-            echo "::error::DEPLOY_DIR is not writable by $(id -un) on $(hostname -s)"
+            echo "::error::DEPLOY_DIR is not writable by $(id -un) on $SERVER_LABEL"
             exit 1
           fi
           if [[ ! -e "$BASE_ENV" ]]; then
-            echo "::error::The server-managed base env file (COMPOSE_ENV, default \$RUNTIME_CONFIG_DIR/.env) does not exist on $(hostname -s). It carries this server's ROUTE_*/APP_* blocks — without it every file-provider route disappears. Provision it on the host."
+            echo "::error::The server-managed base env file (COMPOSE_ENV, default \$RUNTIME_CONFIG_DIR/.env) does not exist on $SERVER_LABEL. It carries this server's ROUTE_*/APP_* blocks — without it every file-provider route disappears. Provision it on the host."
             exit 1
           fi
           if [[ ! -r "$BASE_ENV" ]]; then
-            echo "::error::The server-managed base env file is not readable by $(id -un) on $(hostname -s)"
+            echo "::error::The server-managed base env file is not readable by $(id -un) on $SERVER_LABEL"
             exit 1
           fi
 
           # A pinned override that has gone missing is the exact silent failure this
           # guards: Traefik comes up on `web` only and every labelled backend 504s.
           if [[ "$OVERRIDE_PINNED" -eq 1 && ! -f "$COMPOSE_OVERRIDE" ]]; then
-            echo "::error::COMPOSE_OVERRIDE is pinned in the 'Prod' environment but the file does not exist on $(hostname -s). It attaches this edge to the app data-plane network(s) — create it, or clear the COMPOSE_OVERRIDE variable to fall back to \$RUNTIME_CONFIG_DIR/docker-compose.override.yml."
+            echo "::error::COMPOSE_OVERRIDE is pinned in the 'Prod' environment but the file does not exist on $SERVER_LABEL. It attaches this edge to the app data-plane network(s) — create it, or clear the COMPOSE_OVERRIDE variable to fall back to \$RUNTIME_CONFIG_DIR/docker-compose.override.yml."
             exit 1
           fi
 
@@ -253,11 +320,11 @@ jobs:
           test -f "$static_config"
 
           if ! python3 -c 'import yaml' 2>/dev/null; then
-            echo "::error::python3 cannot import yaml on $(hostname -s) — the static-config merge needs it. Install it once: sudo apt-get install -y python3-yaml"
+            echo "::error::python3 cannot import yaml on $SERVER_LABEL — the static-config merge needs it. Install it once: sudo apt-get install -y python3-yaml"
             exit 1
           fi
           if [[ -e "$static_overlay" && ! -r "$static_overlay" ]]; then
-            echo "::error::The per-server Traefik overlay exists but is not readable by $(id -un) on $(hostname -s)"
+            echo "::error::The per-server Traefik overlay exists but is not readable by $(id -un) on $SERVER_LABEL"
             exit 1
           fi
           # Validate the FORMAT, not just presence. An address Let's Encrypt cannot
@@ -460,6 +527,11 @@ jobs:
           docker compose $COMPOSE_ARGS config --format json \
             | python3 -c 'import sys, json; [print(n.get("name", k)) for k, n in json.load(sys.stdin).get("networks", {}).items() if n.get("external")]' \
             | while read -r net; do
+                # A data-plane network is named after the app that owns it, and
+                # compose prints network names in its own output. Mask it before
+                # anything can echo it. The length guard keeps a short generic name
+                # like `web` unmasked — redacting it would also redact `websecure`.
+                [[ "${#net}" -ge 6 ]] && echo "::add-mask::$net"
                 docker network inspect "$net" >/dev/null 2>&1 || docker network create "$net"
               done
 
@@ -506,15 +578,18 @@ jobs:
             | python3 -c 'import sys, json; s=json.load(sys.stdin)["services"]["traefik"]; print("\n".join((s.get("networks") or {}).keys()))')"
           cid="$(docker compose $COMPOSE_ARGS ps -q traefik)"
           have="$(docker inspect "$cid" --format '{{range $n,$c := .NetworkSettings.Networks}}{{$n}}{{"\n"}}{{end}}')"
-          missing=""
+          missing=0
           for n in $want; do
-            printf '%s\n' "$have" | grep -qx "$n" || missing="$missing $n"
+            printf '%s\n' "$have" | grep -qx "$n" || missing=$((missing + 1))
           done
-          if [ -n "$missing" ]; then
-            echo "::error::edge-traefik is NOT attached to:$missing — the override did not merge. Every labelled backend on those networks will 504."
+          want_count="$(printf '%s\n' "$want" | grep -c . || true)"
+          # Counts, not names: the names are the app data-plane networks, and this
+          # log is public. The command below reproduces the detail on the host.
+          if [ "$missing" -gt 0 ]; then
+            echo "::error::edge-traefik is attached to $((want_count - missing)) of $want_count declared networks — $missing missing, so the server-local compose override did not merge. Every labelled backend on those networks will 504. On $SERVER_LABEL, run: docker inspect \$(docker compose ps -q traefik) --format '{{json .NetworkSettings.Networks}}'"
             exit 1
           fi
-          echo "OK: edge-traefik attached to all declared networks ($(printf '%s' "$want" | tr '\n' ' '))"
+          echo "OK: edge-traefik attached to all $want_count declared networks."
 
       - name: Show status
         if: always()
