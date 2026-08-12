@@ -236,10 +236,12 @@ Set in `.env`:
 
 ```bash
 DASHBOARD_HOST=traefik.example.com
-DASHBOARD_AUTH=admin:$apr1$....      # from: htpasswd -nb admin 'password'
+DASHBOARD_AUTH=            # htpasswd hash — generate with: htpasswd -nb <user> '<password>'
 ```
 
-Regenerate and it's served (with basic auth) at that host over HTTPS.
+Regenerate and it's served (with basic auth) at that host over HTTPS. In deployment the
+hash comes from a GitHub Secret and is merged into the runtime env at deploy time — it is
+never stored in a file in this repository.
 
 <div align="center"><img src="./assets/divider.svg" width="70%" alt="" /></div>
 
