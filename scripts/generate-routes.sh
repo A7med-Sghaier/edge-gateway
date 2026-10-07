@@ -12,6 +12,8 @@
 #                                                      # true = Let's Encrypt cert, false = plain
 #                                                      # HTTP, local = the LOCAL_TLS_* cert below
 #   ROUTE_1_ENTRYPOINTS=websecure                      # optional, default websecure
+#   ROUTE_1_PATHS=/auth,/api                           # optional — only these path prefixes;
+#                                                      # beats a same-host route without PATHS
 #
 # ── APP_* : static SPAs served by the dockerized edge-spa nginx ───────────────
 # Each block renders (a) nginx server block(s) rooted at the on-host build dir
@@ -207,6 +209,7 @@ while :; do
   eval "service=\${ROUTE_${n}_SERVICE:-}"
   eval "tls=\${ROUTE_${n}_TLS:-true}"
   eval "entry=\${ROUTE_${n}_ENTRYPOINTS:-websecure}"
+  eval "paths=\${ROUTE_${n}_PATHS:-}"
 
   if [ -z "$hosts" ] || [ -z "$service" ]; then
     echo "ERROR: ROUTE_${n} ($name) is missing HOSTS or SERVICE" >&2
@@ -228,6 +231,17 @@ while :; do
   esac
 
   rule="$(build_hostrule "$hosts")"
+  # A path-scoped route shares its hosts with a catch-all one (an SPA with its API
+  # on the same name). Traefik ranks routers by rule length, so the longer rule
+  # with the PathPrefix wins without an explicit priority.
+  if [ -n "$paths" ]; then
+    path_rule="$(build_pathrule "$paths")"
+    if [ -z "$path_rule" ]; then
+      echo "ERROR: ROUTE_${n} ($name) sets PATHS but none is a usable prefix" >&2
+      exit 1
+    fi
+    rule="(${rule}) && (${path_rule})"
+  fi
   {
     echo "    ${name}:"
     echo "      rule: \"${rule}\""
