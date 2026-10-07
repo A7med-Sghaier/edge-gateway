@@ -27,3 +27,5 @@ nginx/generated/
 .claude/settings.local.json
 
 .idea/
+# Locally issued dev certificates (mkcert) — private keys, never committed
+certs/
