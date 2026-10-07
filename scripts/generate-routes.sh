@@ -9,6 +9,8 @@
 #   ROUTE_1_HOSTS=dash.example.com,app.example.com     # comma-separated hostnames
 #   ROUTE_1_SERVICE=http://dashboard:8080              # backend url (container or external)
 #   ROUTE_1_TLS=true                                   # optional, default true
+#                                                      # true = Let's Encrypt cert, false = plain
+#                                                      # HTTP, local = the LOCAL_TLS_* cert below
 #   ROUTE_1_ENTRYPOINTS=websecure                      # optional, default websecure
 #
 # ── APP_* : static SPAs served by the dockerized edge-spa nginx ───────────────
@@ -36,6 +38,13 @@
 #   TCP_1_HOSTSNI=mongo.example.com                    # optional, default '*'
 #   TCP_1_TLS=true                                     # optional, default true
 #   TCP_1_ALLOWLIST=203.0.113.7/32,198.51.100.0/24     # optional, comma-separated CIDRs
+#
+# ── LOCAL_TLS_* : one locally issued certificate (e.g. mkcert) ────────────────
+# For a hostname Let's Encrypt cannot reach — a dev name pointed at 127.0.0.1 in
+# /etc/hosts. Paths are INSIDE the traefik container; mount the files there from a
+# local, gitignored docker-compose.override.yml. Routes opt in with ROUTE_N_TLS=local.
+#   LOCAL_TLS_CERT_FILE=/etc/traefik/certs/dev.pem
+#   LOCAL_TLS_KEY_FILE=/etc/traefik/certs/dev-key.pem
 #
 # ── Optional Traefik dashboard ────────────────────────────────────────────────
 #   DASHBOARD_HOST=traefik.example.com
@@ -178,6 +187,16 @@ route_count=0
 app_count=0
 tcp_count=0
 
+LOCAL_TLS_CERT_FILE="${LOCAL_TLS_CERT_FILE:-}"
+LOCAL_TLS_KEY_FILE="${LOCAL_TLS_KEY_FILE:-}"
+# Half a pair loads no certificate at all, and Traefik then answers with its own
+# self-signed default, which looks like a trust problem rather than a config one.
+if { [ -n "$LOCAL_TLS_CERT_FILE" ] && [ -z "$LOCAL_TLS_KEY_FILE" ]; } ||
+   { [ -z "$LOCAL_TLS_CERT_FILE" ] && [ -n "$LOCAL_TLS_KEY_FILE" ]; }; then
+  echo "ERROR: set both LOCAL_TLS_CERT_FILE and LOCAL_TLS_KEY_FILE, or neither" >&2
+  exit 1
+fi
+
 # ── ROUTE_* (Traefik-only proxies) ────────────────────────────────────────────
 n=1
 while :; do
@@ -194,6 +213,20 @@ while :; do
     exit 1
   fi
 
+  case "$tls" in
+    true | false) ;;
+    local)
+      if [ -z "$LOCAL_TLS_CERT_FILE" ]; then
+        echo "ERROR: ROUTE_${n} ($name) has TLS=local but LOCAL_TLS_CERT_FILE/LOCAL_TLS_KEY_FILE are not set" >&2
+        exit 1
+      fi
+      ;;
+    *)
+      echo "ERROR: ROUTE_${n} ($name) TLS must be true, false or local (got '$tls')" >&2
+      exit 1
+      ;;
+  esac
+
   rule="$(build_hostrule "$hosts")"
   {
     echo "    ${name}:"
@@ -203,6 +236,9 @@ while :; do
     if [ "$tls" = "true" ]; then
       echo "      tls:"
       echo "        certResolver: le"
+    elif [ "$tls" = "local" ]; then
+      # No resolver: Traefik picks the LOCAL_TLS_* certificate from its store by SNI.
+      echo "      tls: {}"
     fi
   } >> "$ROUTERS"
   {
@@ -423,6 +459,12 @@ fi
       echo "  services:"
       cat "$TCP_SERVICES"
     fi
+  fi
+  if [ -n "$LOCAL_TLS_CERT_FILE" ]; then
+    echo "tls:"
+    echo "  certificates:"
+    echo "    - certFile: \"${LOCAL_TLS_CERT_FILE}\""
+    echo "      keyFile: \"${LOCAL_TLS_KEY_FILE}\""
   fi
 } > "$OUT"
 
